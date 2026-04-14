@@ -34,11 +34,11 @@ We use **branches** as our primary version control mechanism. To keep the projec
    git pull origin main
    
    # Examples of branch names per owner:
-   git checkout -b feature/01-sampling       # For Owner 1
-   git checkout -b feature/02-processing     # For Owner 2
-   git checkout -b feature/03-pc-backend     # For Owner 3
-   git checkout -b feature/04-python-cli     # For Owner 4
-   git checkout -b feature/05-protocols      # For Owner 5
+   git checkout -b feature/01-sampling       
+   git checkout -b feature/02-processing     
+   git checkout -b feature/03-pc-backend     
+   git checkout -b feature/04-python-cli     
+   git checkout -b feature/05-protocols     
    ```
 
 3. **Work within your dedicated folder:**
