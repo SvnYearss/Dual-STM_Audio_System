@@ -45,6 +45,7 @@ ADC_HandleTypeDef hadc1;
 
 TIM_HandleTypeDef htim7;
 
+UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
@@ -64,6 +65,7 @@ static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_TIM7_Init(void);
+static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -105,6 +107,7 @@ int main(void)
   MX_USART2_UART_Init();
   MX_ADC1_Init();
   MX_TIM7_Init();
+  MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
   HAL_TIM_Base_Start_IT(&htim7);
   /* USER CODE END 2 */
@@ -277,6 +280,41 @@ static void MX_TIM7_Init(void)
 }
 
 /**
+  * @brief USART1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART1_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART1_Init 0 */
+
+  /* USER CODE END USART1_Init 0 */
+
+  /* USER CODE BEGIN USART1_Init 1 */
+
+  /* USER CODE END USART1_Init 1 */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 230400;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART1_Init 2 */
+
+  /* USER CODE END USART1_Init 2 */
+
+}
+
+/**
   * @brief USART2 Initialization Function
   * @param None
   * @retval None
@@ -355,17 +393,17 @@ void HAL_TIM_PeriodElapsedCallback (TIM_HandleTypeDef* htim)
     //get the unsigned 12-bit ADC data
     raw_ADC_value = HAL_ADC_GetValue(&hadc1);
     //print the raw ADC value into string 1
-     sprintf(string_1,"raw ADC value: %d\n",raw_ADC_value);
+//     sprintf(string_1,"raw ADC value: %d\n",raw_ADC_value);
     //Transmit string_1 over UART
-     HAL_UART_Transmit(&huart2,(uint8_t*)string_1,strlen(string_1),10);
+//     HAL_UART_Transmit(&huart2,(uint8_t*)string_1,strlen(string_1),10);
     //Extract least significant 8 bits of ADC data
-//    temp = raw_ADC_value & 0xFF;
-//    raw_ADC_value_1[0] = temp;
+    temp = raw_ADC_value & 0xFF;
+    raw_ADC_value_1[0] = temp;
     //Extract most significant 8 bits of ADC data
-//    temp = raw_ADC_value >>8;
-//    raw_ADC_value_1[1] = temp;
+    temp = raw_ADC_value >>8;
+    raw_ADC_value_1[1] = temp;
     //Transmit 16-bit ADC data through UART
-//    HAL_UART_Transmit(&huart2,(uint8_t*)raw_ADC_value_1,2,10);
+    HAL_UART_Transmit(&huart2,(uint8_t*)raw_ADC_value_1,2,10);
     //stop ADC
     HAL_ADC_Stop(&hadc1);
   }
@@ -386,7 +424,8 @@ void Error_Handler(void)
   }
   /* USER CODE END Error_Handler_Debug */
 }
-#ifdef USE_FULL_ASSERT
+
+#ifdef  USE_FULL_ASSERT
 /**
   * @brief  Reports the name of the source file and the source line number
   *         where the assert_param error has occurred.

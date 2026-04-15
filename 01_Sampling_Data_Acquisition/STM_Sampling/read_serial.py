@@ -1,5 +1,5 @@
 import serial
-ser = serial.Serial(port = "/dev/tty.usbmodem11303", baudrate = 230400, bytesize = 8, parity = "N", stopbits = 1, timeout = 5)
+ser = serial.Serial(port = "COM5", baudrate = 230400, bytesize = 8, parity = "N", stopbits = 1, timeout = 5)
 print(ser.name)
 file_1 = open("raw_ADC_values.data", "wb")
 for i in range(100):
