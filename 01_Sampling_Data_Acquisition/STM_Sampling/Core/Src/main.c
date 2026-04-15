@@ -397,13 +397,15 @@ void HAL_TIM_PeriodElapsedCallback (TIM_HandleTypeDef* htim)
     //Transmit string_1 over UART
 //     HAL_UART_Transmit(&huart2,(uint8_t*)string_1,strlen(string_1),10);
     //Extract least significant 8 bits of ADC data
-    temp = raw_ADC_value & 0xFF;
-    raw_ADC_value_1[0] = temp;
-    //Extract most significant 8 bits of ADC data
-    temp = raw_ADC_value >>8;
-    raw_ADC_value_1[1] = temp;
+    // temp = raw_ADC_value & 0xFF;
+    // raw_ADC_value_1[0] = temp;
+    // //Extract most significant 8 bits of ADC data
+    // temp = raw_ADC_value >>8;
+    // raw_ADC_value_1[1] = temp;
+    uint8_t data8 = (uint8_t)(raw >> 4);
     //Transmit 16-bit ADC data through UART
-    HAL_UART_Transmit(&huart2,(uint8_t*)raw_ADC_value_1,2,10);
+    // HAL_UART_Transmit(&huart2,(uint8_t*)raw_ADC_value_1,2,10);
+    HAL_UART_Transmit(&huart1, &data8, 1, 10);
     //stop ADC
     HAL_ADC_Stop(&hadc1);
   }
