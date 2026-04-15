@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "C/C++ Runner: Debug Session",
+      "type": "lldb",
+      "request": "launch",
+      "args": [],
+      "cwd": "/Users/wongkaiheng/STM32CubeIDE/workspace_2.1.1/Project_Week_6",
+      "program": "/Users/wongkaiheng/STM32CubeIDE/workspace_2.1.1/Project_Week_6/build/Debug/outDebug"
+    }
+  ]
+}
