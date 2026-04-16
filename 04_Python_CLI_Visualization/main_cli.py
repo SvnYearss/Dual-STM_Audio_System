@@ -19,6 +19,7 @@ def record_audio(mode_name, command_byte):
         ser.write(command_byte)
         print(f"\n[{mode_name}] Recording for {DURATION} seconds...")
         raw_data = ser.read(bytes_to_read)
+        ser.write(b'S')
         print(f"[{mode_name}] Recording complete!")
 
     # 2. Save binary file for C program
