@@ -50,13 +50,13 @@ UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 //use to store the temporary result of the latest ADC version
-uint16_t raw_ADC_value =0;
+uint16_t raw_ADC_value = 0;
 //broken to two bytes and store in 8-bit array
 uint8_t raw_ADC_value_1[2]={0};
 uint16_t temp = 0;
 //write the value of variable DC value
 char string_1[40]="\0";
-
+uint8_t cmd_rx = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -109,7 +109,7 @@ int main(void)
   MX_TIM7_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-  HAL_TIM_Base_Start_IT(&htim7);
+  HAL_UART_Receive_IT(&huart1, &cmd_rx, 1);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -386,29 +386,31 @@ void HAL_TIM_PeriodElapsedCallback (TIM_HandleTypeDef* htim)
 {
   if (htim == &htim7)
   {
-    //start ADC
     HAL_ADC_Start(&hadc1);
-    //wait for conversion
     HAL_ADC_PollForConversion(&hadc1,10);
-    //get the unsigned 12-bit ADC data
     raw_ADC_value = HAL_ADC_GetValue(&hadc1);
-    //print the raw ADC value into string 1
-//     sprintf(string_1,"raw ADC value: %d\n",raw_ADC_value);
-    //Transmit string_1 over UART
-//     HAL_UART_Transmit(&huart2,(uint8_t*)string_1,strlen(string_1),10);
-    //Extract least significant 8 bits of ADC data
-    // temp = raw_ADC_value & 0xFF;
-    // raw_ADC_value_1[0] = temp;
-    // //Extract most significant 8 bits of ADC data
-    // temp = raw_ADC_value >>8;
-    // raw_ADC_value_1[1] = temp;
-    uint8_t data8 = (uint8_t)(raw >> 4);
-    //Transmit 16-bit ADC data through UART
-    // HAL_UART_Transmit(&huart2,(uint8_t*)raw_ADC_value_1,2,10);
+    uint8_t data8 = (uint8_t)(raw_ADC_value >> 4);
     HAL_UART_Transmit(&huart1, &data8, 1, 10);
-    //stop ADC
+
     HAL_ADC_Stop(&hadc1);
   }
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+	if (huart->Instance == USART1)
+	{
+		if(cmd_rx == 'M')
+		{
+			HAL_TIM_Base_Start_IT(&htim7);
+		}
+		else if (cmd_rx == 'S')
+		{
+			HAL_TIM_Base_Stop_IT(&htim7);
+		}
+
+		HAL_UART_Receive_IT(&huart1, &cmd_rx, 1);
+	}
 }
 /* USER CODE END 4 */
 
