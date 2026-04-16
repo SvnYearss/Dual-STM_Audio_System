@@ -44,7 +44,7 @@ UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-
+uint8_t pc_rx_byte;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -94,6 +94,7 @@ int main(void)
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
   HAL_UART_Receive_IT(&huart1, &rx_byte, 1);
+  HAL_UART_Receive_IT(&huart2, &pc_rx_byte, 1);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -286,6 +287,15 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 		HAL_UART_Transmit(&huart2, &average, 1, HAL_MAX_DELAY);
 
 		HAL_UART_Receive_IT(&huart1, &rx_byte, 1);
+	}
+
+	else if(huart->Instance == USART2)
+	{
+		HAL_UART_Transmit(&huart1, &pc_rx_byte, 1, HAL_MAX_DELAY);
+
+		HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin); // To tell it received and transmitted a message
+
+		HAL_UART_Receive_IT(&huart2, &pc_rx_byte, 1);
 	}
 }
 /* USER CODE END 4 */
