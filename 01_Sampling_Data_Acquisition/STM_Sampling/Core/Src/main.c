@@ -389,23 +389,7 @@ void HAL_TIM_PeriodElapsedCallback (TIM_HandleTypeDef* htim)
     HAL_ADC_Start(&hadc1);
     HAL_ADC_PollForConversion(&hadc1,10);
     raw_ADC_value = HAL_ADC_GetValue(&hadc1);
-<<<<<<< HEAD
     uint8_t data8 = (uint8_t)(raw_ADC_value >> 4);
-=======
-    //print the raw ADC value into string 1
-//     sprintf(string_1,"raw ADC value: %d\n",raw_ADC_value);
-    //Transmit string_1 over UART
-//     HAL_UART_Transmit(&huart2,(uint8_t*)string_1,strlen(string_1),10);
-    //Extract least significant 8 bits of ADC data
-    // temp = raw_ADC_value & 0xFF;
-    // raw_ADC_value_1[0] = temp;
-    // //Extract most significant 8 bits of ADC data
-    // temp = raw_ADC_value >>8;
-    // raw_ADC_value_1[1] = temp;
-    uint8_t data8 = (uint8_t)(raw_ADC_value >> 4);
-    //Transmit 16-bit ADC data through UART
-    // HAL_UART_Transmit(&huart2,(uint8_t*)raw_ADC_value_1,2,10);
->>>>>>> cb9bc7f426c25ee323936809a424b19e7241b545
     HAL_UART_Transmit(&huart1, &data8, 1, 10);
 
     HAL_ADC_Stop(&hadc1);
