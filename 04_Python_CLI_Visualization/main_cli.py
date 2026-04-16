@@ -9,12 +9,14 @@ BAUD = 230400
 FS = 6400
 DURATION = 5
 
-def record_audio(mode_name):
+def record_audio(mode_name, command_byte):
     """Core function for recording, generating binary file, converting to WAV, and saving CSV and PNG"""
     bytes_to_read = FS * DURATION * 1
     
     # 1. Record Audio
     with serial.Serial(PORT, BAUD, timeout=10) as ser:
+
+        ser.write(command_byte)
         print(f"\n[{mode_name}] Recording for {DURATION} seconds...")
         raw_data = ser.read(bytes_to_read)
         print(f"[{mode_name}] Recording complete!")
@@ -65,12 +67,11 @@ if __name__ == "__main__":
         if choice == '1':
             print("\nYou selected Manual Recording.")
             input("Press Enter to start recording...") # Blocking wait for user confirmation
-            record_audio("Manual Mode")
+            record_audio("Manual Mode", b'M')
             
         elif choice == '2':
             print("\nYou selected Distance Trigger Mode.")
-            # TODO: In Phase 2, we will add the logic here to wait for MCU ultrasonic trigger
-            print("This feature is currently under development...")
+            record_audio("Distance Trigger Mode", b'D')
             
         elif choice.lower() == 'q':
             print("Exiting program. Goodbye!")
