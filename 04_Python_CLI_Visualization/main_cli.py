@@ -5,13 +5,13 @@ import matplotlib.pyplot as plt
 
 # --- Configuration Parameters ---
 PORT = '/dev/cu.usbmodemXXXXX'
-BAUD = 230400
-FS = 22050
+BAUD = 921600
+FS = 44100
 DURATION = 5
 
 def record_audio(mode_name, command_byte):
     """Core function for recording, generating binary file, converting to WAV, and saving CSV and PNG"""
-    bytes_to_read = FS * DURATION * 1
+    bytes_to_read = FS * DURATION * 2
     
     # 1. Record Audio
     with serial.Serial(PORT, BAUD, timeout=10) as ser:
@@ -35,7 +35,7 @@ def record_audio(mode_name, command_byte):
     # ==========================================
     
     # Convert byte string to Numpy array (8-bit unsigned integer)
-    data_array = np.frombuffer(raw_data, dtype=np.uint8)
+    data_array = np.frombuffer(raw_data, dtype=np.uint16)
 
     # 4. Generate .csv file (Numpy one-liner instead of a for loop!)
     np.savetxt("audio_data.csv", data_array, delimiter=",", fmt='%d')
@@ -46,7 +46,7 @@ def record_audio(mode_name, command_byte):
     plt.plot(data_array, color='blue', linewidth=0.5)
     plt.title(f"Audio Waveform ({mode_name})")
     plt.xlabel("Sample Index")
-    plt.ylabel("Amplitude (8-bit)")
+    plt.ylabel("Amplitude (12/16-bit)")
     plt.grid(True)
     plt.savefig("waveform.png")
     plt.close() # Remember to close the figure to release memory
