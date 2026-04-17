@@ -71,7 +71,6 @@ int main() {
     
     while (fread(&raw_adc_value, sizeof(uint8_t), 1, raw_file) == 1) {
         
-        fwrite(&raw_adc_value, sizeof(int8_t), 1, wav_file);
         int16_t scaled_audio = (int16_t)((raw_adc_value - 2048) * 8);
         fwrite(&scaled_audio, sizeof(int16_t), 1, wav_file);
     }
