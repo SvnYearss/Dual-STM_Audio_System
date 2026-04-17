@@ -4,9 +4,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # --- Configuration Parameters ---
-PORT = '/dev/cu.usbmodemXXXXX' # Remember to replace with your Mac port
+PORT = '/dev/cu.usbmodemXXXXX'
 BAUD = 230400
-FS = 6400
+FS = 22050
 DURATION = 5
 
 def record_audio(mode_name, command_byte):
