@@ -56,12 +56,12 @@ int main() {
     header.audio_format = 1;
     header.num_channels = 1;
     header.sample_rate = 44100; 
-    header.byte_rate = 44100; // 22050 * 8 * 1 / 8
-    header.sample_alignment = 1; // 8 * 1 / 8
-    header.bit_depth = 8;
+    header.byte_rate = 44100 * 2; // 22050 * 8 * 1 / 8
+    header.sample_alignment = 2; // 8 * 1 / 8
+    header.bit_depth = 16;
     
     memcpy(header.data_header, "data", 4);
-    header.data_bytes = 50000; 
+    header.data_bytes = 50000 * 2; 
 
     // Write Header to the wav file
     fwrite(&header, sizeof(WavHeader), 1, wav_file);
