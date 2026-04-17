@@ -55,8 +55,8 @@ int main() {
     header.fmt_chunk_size = 16;
     header.audio_format = 1;
     header.num_channels = 1;
-    header.sample_rate = 22050; 
-    header.byte_rate = 22050; // 22050 * 8 * 1 / 8
+    header.sample_rate = 44100; 
+    header.byte_rate = 44100; // 22050 * 8 * 1 / 8
     header.sample_alignment = 1; // 8 * 1 / 8
     header.bit_depth = 8;
     
