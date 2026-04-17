@@ -55,7 +55,7 @@ UART_HandleTypeDef huart2;
 //use to store the temporary result of the latest ADC version
 uint16_t raw_ADC_value = 0;
 //broken to two bytes and store in 8-bit array
-uint8_t raw_ADC_value_1[2]={0};
+uint8_t tx_buffer[2]={0};
 uint16_t temp = 0;
 //write the value of variable DC value
 char string_1[40]="\0";
@@ -363,9 +363,9 @@ static void MX_TIM7_Init(void)
 
   /* USER CODE END TIM7_Init 1 */
   htim7.Instance = TIM7;
-  htim7.Init.Prescaler = 50-1;
+  htim7.Init.Prescaler = 5;
   htim7.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim7.Init.Period = 100-1;
+  htim7.Init.Period = 120;
   htim7.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim7) != HAL_OK)
   {
@@ -445,7 +445,7 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 230400;
+  huart1.Init.BaudRate = 921600;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
@@ -539,8 +539,11 @@ void HAL_TIM_PeriodElapsedCallback (TIM_HandleTypeDef* htim)
     HAL_ADC_Start(&hadc1);
     HAL_ADC_PollForConversion(&hadc1,10);
     raw_ADC_value = HAL_ADC_GetValue(&hadc1);
-    uint8_t data8 = (uint8_t)(raw_ADC_value >> 4);
-    HAL_UART_Transmit(&huart1, &data8, 1, 10);
+
+    tx_buffer[0] = (uint8_t)(raw_ADC_value >> 8);
+    tx_buffer[1] = (uint8_t)(raw_ADC_value & 0xFF);
+
+    HAL_UART_Transmit(&huart1, tx_buffer, 2, 10);
 
     HAL_ADC_Stop(&hadc1);
   }
