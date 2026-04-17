@@ -54,11 +54,7 @@ UART_HandleTypeDef huart2;
 /* USER CODE BEGIN PV */
 //use to store the temporary result of the latest ADC version
 uint16_t raw_ADC_value = 0;
-//broken to two bytes and store in 8-bit array
-uint8_t raw_ADC_value_1[2]={0};
-uint16_t temp = 0;
-//write the value of variable DC value
-char string_1[40]="\0";
+
 uint8_t cmd_rx = 0;
 uint8_t system_state = '0';
 uint32_t IC_Val1 = 0;
@@ -539,8 +535,9 @@ void HAL_TIM_PeriodElapsedCallback (TIM_HandleTypeDef* htim)
     HAL_ADC_Start(&hadc1);
     HAL_ADC_PollForConversion(&hadc1,10);
     raw_ADC_value = HAL_ADC_GetValue(&hadc1);
-    uint8_t data8 = (uint8_t)(raw_ADC_value >> 4);
-    HAL_UART_Transmit(&huart1, &data8, 1, 10);
+    static uint8_t data8;
+    data8 = (uint8_t)(raw_ADC_value >> 4);
+    HAL_UART_Transmit_IT(&huart1, &data8, 1);
 
     HAL_ADC_Stop(&hadc1);
   }
@@ -594,11 +591,7 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 		{
 			IC_Val2 = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
 
-			if (IC_Val2 > IC_Val1) {
-				Difference = IC_Val2 - IC_Val1;
-			} else {
-				Difference = (0xFFFFFFFF - IC_Val1) + IC_Val2;
-			}
+			Difference = IC_Val2 - IC_Val1;
 
 			distance = Difference * 0.0343 / 2.0;
 			Is_First_Captured = 0;

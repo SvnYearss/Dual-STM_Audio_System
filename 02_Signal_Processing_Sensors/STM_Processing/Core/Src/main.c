@@ -282,16 +282,17 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 		index = (index + 1) % 3;
 
 		uint16_t sum = buffer[0] + buffer[1] + buffer[2];
-		uint8_t average = (uint8_t)(sum/3);
+		static uint8_t average;
+		average = (uint8_t)(sum/3);
 
-		HAL_UART_Transmit(&huart2, &average, 1, HAL_MAX_DELAY);
+		HAL_UART_Transmit_IT(&huart2, &average, 1);
 
 		HAL_UART_Receive_IT(&huart1, &rx_byte, 1);
 	}
 
 	else if(huart->Instance == USART2)
 	{
-		HAL_UART_Transmit(&huart1, &pc_rx_byte, 1, HAL_MAX_DELAY);
+		HAL_UART_Transmit_IT(&huart1, &pc_rx_byte, 1);
 
 		HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin); // To tell it received and transmitted a message
 
