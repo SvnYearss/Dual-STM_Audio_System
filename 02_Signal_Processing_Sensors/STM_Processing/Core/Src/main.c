@@ -21,7 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdlib.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -44,7 +44,16 @@ UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-uint8_t pc_rx_byte;
+uint8_t pc_rx_byte = 0;
+uint8_t rx_buffer[2];
+uint8_t sample_count = 0;
+uint8_t pc_tx_byte = 0;
+
+uint16_t sample_history[3] = {0, 0, 0};
+uint8_t buffer_index = 0;
+uint16_t last_valid_sample = 0;
+uint8_t downsample_counter = 0;
+int THRESHOLD = 50;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -93,7 +102,7 @@ int main(void)
   MX_USART2_UART_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-  HAL_UART_Receive_IT(&huart1, &rx_byte, 1);
+  HAL_UART_Receive_IT(&huart1, rx_buffer, 2);
   HAL_UART_Receive_IT(&huart2, &pc_rx_byte, 1);
   /* USER CODE END 2 */
 
@@ -184,7 +193,7 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 230400;
+  huart1.Init.BaudRate = 921600;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
@@ -273,20 +282,40 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-	if (huart->Instance == USART1){
+	if (huart->Instance == USART1)
+	{
+		sample_count ++;
 
-		static uint8_t buffer [3] = {0, 0, 0};
-		static uint8_t index = 0;
+		if (sample_count >= 2)
+		{
+			sample_count = 0;
 
-		buffer[index] = rx_byte;
-		index = (index + 1) % 3;
+			uint16_t current_adc = (rx_buffer[0] << 8) | rx_buffer[1];
 
-		uint16_t sum = buffer[0] + buffer[1] + buffer[2];
-		uint8_t average = (uint8_t)(sum/3);
+			if (abs((int)current_adc - (int)last_valid_sample) > THRESHOLD)
+			{
+				current_adc = last_valid_sample;
+			}
 
-		HAL_UART_Transmit(&huart2, &average, 1, HAL_MAX_DELAY);
+			last_valid_sample = current_adc;
 
-		HAL_UART_Receive_IT(&huart1, &rx_byte, 1);
+			sample_history[buffer_index] = current_adc;
+			buffer_index++;
+			if (buffer_index >= 3)
+			{
+				buffer_index = 0;
+			}
+			uint16_t average_adc = (sample_history[0] + sample_history[1] + sample_history[2])/3;
+			downsample_counter++;
+			if (down_counter >= 2)
+			{
+				downsample_counter = 0;
+				pc_tx_byte = (uint8_t)(average_adc >> 2);
+				HAL_UART_Transmit(&huart2, &pc_tx_byte, 1, 10);
+			}
+
+		}
+		HAL_UART_Receive_IT(&huart1, rx_buffer, 2);
 	}
 
 	else if(huart->Instance == USART2)
