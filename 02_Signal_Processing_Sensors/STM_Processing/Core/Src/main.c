@@ -40,8 +40,12 @@ uint8_t rx_byte;
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+SPI_HandleTypeDef hspi1;
+DMA_HandleTypeDef hdma_spi1_rx;
+
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
+DMA_HandleTypeDef hdma_usart2_tx;
 
 /* USER CODE BEGIN PV */
 uint8_t pc_rx_byte = 0;
@@ -54,13 +58,18 @@ uint8_t buffer_index = 0;
 uint16_t last_valid_sample = 0;
 uint8_t downsample_counter = 0;
 int THRESHOLD = 50;
+uint16_t spi_rx_buffer[200];
+uint8_t uart_tx_buffer_half1[200];
+uint8_t uart_tx_buffer_half2[200];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_SPI1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -99,11 +108,14 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_USART2_UART_Init();
   MX_USART1_UART_Init();
+  MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
   HAL_UART_Receive_IT(&huart1, rx_buffer, 2);
   HAL_UART_Receive_IT(&huart2, &pc_rx_byte, 1);
+  HAL_SPI_Receive_DMA(&hspi1, (uint8_t*)spi_rx_buffer, 200);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -178,6 +190,45 @@ void SystemClock_Config(void)
 }
 
 /**
+  * @brief SPI1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_SPI1_Init(void)
+{
+
+  /* USER CODE BEGIN SPI1_Init 0 */
+
+  /* USER CODE END SPI1_Init 0 */
+
+  /* USER CODE BEGIN SPI1_Init 1 */
+
+  /* USER CODE END SPI1_Init 1 */
+  /* SPI1 parameter configuration*/
+  hspi1.Instance = SPI1;
+  hspi1.Init.Mode = SPI_MODE_SLAVE;
+  hspi1.Init.Direction = SPI_DIRECTION_2LINES_RXONLY;
+  hspi1.Init.DataSize = SPI_DATASIZE_16BIT;
+  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi1.Init.NSS = SPI_NSS_SOFT;
+  hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
+  hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
+  hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+  hspi1.Init.CRCPolynomial = 7;
+  hspi1.Init.CRCLength = SPI_CRC_LENGTH_DATASIZE;
+  hspi1.Init.NSSPMode = SPI_NSS_PULSE_DISABLE;
+  if (HAL_SPI_Init(&hspi1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN SPI1_Init 2 */
+
+  /* USER CODE END SPI1_Init 2 */
+
+}
+
+/**
   * @brief USART1 Initialization Function
   * @param None
   * @retval None
@@ -193,7 +244,7 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 921600;
+  huart1.Init.BaudRate = 115200;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
@@ -228,7 +279,7 @@ static void MX_USART2_UART_Init(void)
 
   /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = 230400;
+  huart2.Init.BaudRate = 921600;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;
@@ -244,6 +295,25 @@ static void MX_USART2_UART_Init(void)
   /* USER CODE BEGIN USART2_Init 2 */
 
   /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Channel2_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel2_IRQn);
+  /* DMA1_Channel7_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel7_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel7_IRQn);
 
 }
 
@@ -282,43 +352,7 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-	if (huart->Instance == USART1)
-	{
-		sample_count ++;
-
-		if (sample_count >= 2)
-		{
-			sample_count = 0;
-
-			uint16_t current_adc = (rx_buffer[0] << 8) | rx_buffer[1];
-
-			if (abs((int)current_adc - (int)last_valid_sample) > THRESHOLD)
-			{
-				current_adc = last_valid_sample;
-			}
-
-			last_valid_sample = current_adc;
-
-			sample_history[buffer_index] = current_adc;
-			buffer_index++;
-			if (buffer_index >= 3)
-			{
-				buffer_index = 0;
-			}
-			uint16_t average_adc = (sample_history[0] + sample_history[1] + sample_history[2])/3;
-			downsample_counter++;
-			if (down_counter >= 2)
-			{
-				downsample_counter = 0;
-				pc_tx_byte = (uint8_t)(average_adc >> 2);
-				HAL_UART_Transmit(&huart2, &pc_tx_byte, 1, 10);
-			}
-
-		}
-		HAL_UART_Receive_IT(&huart1, rx_buffer, 2);
-	}
-
-	else if(huart->Instance == USART2)
+	if(huart->Instance == USART2)
 	{
 		HAL_UART_Transmit(&huart1, &pc_rx_byte, 1, HAL_MAX_DELAY);
 
@@ -326,6 +360,64 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
 		HAL_UART_Receive_IT(&huart2, &pc_rx_byte, 1);
 	}
+}
+
+void HAL_SPI_RxHalfCpltCallback(SPI_HandleTypeDef *hspi)
+{
+    if(hspi->Instance == SPI1)
+    {
+        for(int i = 0; i < 100; i++)
+        {
+            uint16_t current_val = spi_rx_buffer[i];
+
+            int diff = (int)current_val - (int)last_valid_sample;
+            if(abs(diff) > THRESHOLD)
+            {
+                current_val = last_valid_sample;
+            }
+            last_valid_sample = current_val;
+
+            sample_history[buffer_index] = current_val;
+            buffer_index++;
+            if(buffer_index >= 3) { buffer_index = 0; }
+
+            uint16_t avg = (sample_history[0] + sample_history[1] + sample_history[2]) / 3;
+
+            uart_tx_buffer_half1[i * 2]     = (uint8_t)(avg >> 8);
+            uart_tx_buffer_half1[i * 2 + 1] = (uint8_t)(avg & 0xFF);
+        }
+
+        HAL_UART_Transmit_DMA(&huart2, uart_tx_buffer_half1, 200);
+    }
+}
+
+void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
+{
+    if(hspi->Instance == SPI1)
+    {
+        for(int i = 0; i < 100; i++)
+        {
+            uint16_t current_val = spi_rx_buffer[i + 100];
+
+            int diff = (int)current_val - (int)last_valid_sample;
+            if(abs(diff) > THRESHOLD)
+            {
+                current_val = last_valid_sample;
+            }
+            last_valid_sample = current_val;
+
+            sample_history[buffer_index] = current_val;
+            buffer_index++;
+            if(buffer_index >= 3) { buffer_index = 0; }
+
+            uint16_t avg = (sample_history[0] + sample_history[1] + sample_history[2]) / 3;
+
+            uart_tx_buffer_half2[i * 2]     = (uint8_t)(avg >> 8);
+            uart_tx_buffer_half2[i * 2 + 1] = (uint8_t)(avg & 0xFF);
+        }
+
+        HAL_UART_Transmit_DMA(&huart2, uart_tx_buffer_half2, 200);
+    }
 }
 /* USER CODE END 4 */
 
