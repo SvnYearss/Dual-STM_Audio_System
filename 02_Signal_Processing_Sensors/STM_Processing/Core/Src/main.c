@@ -282,8 +282,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 		index = (index + 1) % 3;
 
 		uint16_t sum = buffer[0] + buffer[1] + buffer[2];
-		static uint8_t average;
-		average = (uint8_t)(sum/3);
+		uint8_t average = (uint8_t)(sum/3);
 
 		HAL_UART_Transmit_IT(&huart2, &average, 1);
 

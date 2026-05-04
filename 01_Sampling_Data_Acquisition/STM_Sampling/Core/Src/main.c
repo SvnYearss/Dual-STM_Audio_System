@@ -359,9 +359,9 @@ static void MX_TIM7_Init(void)
 
   /* USER CODE END TIM7_Init 1 */
   htim7.Instance = TIM7;
-  htim7.Init.Prescaler = 50-1;
+  htim7.Init.Prescaler = 31;
   htim7.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim7.Init.Period = 100-1;
+  htim7.Init.Period = 124;
   htim7.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim7) != HAL_OK)
   {
@@ -533,12 +533,15 @@ void HAL_TIM_PeriodElapsedCallback (TIM_HandleTypeDef* htim)
   if (htim == &htim7)
   {
     HAL_ADC_Start(&hadc1);
-    HAL_ADC_PollForConversion(&hadc1,10);
+    HAL_ADC_PollForConversion(&hadc1, 10);
+    // Get the unsigned 12-bit ADC data (range: 0 - 4095)
     raw_ADC_value = HAL_ADC_GetValue(&hadc1);
-    static uint8_t data8;
-    data8 = (uint8_t)(raw_ADC_value >> 4);
-    HAL_UART_Transmit_IT(&huart1, &data8, 1);
 
+    // Compress 12-bit value into 8-bit for MVP transmission
+    uint8_t sample_8bit = (uint8_t)(raw_ADC_value >> 4);
+
+    // Transmit 1 byte of 8-bit ADC data through UART1
+    HAL_UART_Transmit(&huart1, &sample_8bit, 1, 10);
     HAL_ADC_Stop(&hadc1);
   }
 
