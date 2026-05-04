@@ -22,10 +22,10 @@ import argparse
 # Configuration Constants
 # ---------------------------------------------------------------------------
 DEFAULT_BAUDRATE = 230400
-DEFAULT_SAMPLE_RATE = 6400   # Must match processing.c and STM32 timer config
+DEFAULT_SAMPLE_RATE = 22050   # Must match processing.c and STM32 timer config
 RAW_OUTPUT_FILE = "raw_ADC_values.data"
 WAV_OUTPUT_FILE = "output_audio.wav"
-CONVERTER_EXE = "processing"   # Name of the compiled C executable (no .exe)
+CONVERTER_EXE = "file_conversion"   # Name of the compiled C executable (no .exe)
 
 # STM32 command bytes (must match firmware HAL_UART_RxCpltCallback)
 CMD_MANUAL_START = b'M'
@@ -68,10 +68,10 @@ def select_com_port():
 def capture_serial_data(ser, duration_seconds):
     """
     Capture raw ADC data from serial for the specified duration.
-    Each sample is 2 bytes (uint16_t, little-endian).
+    Each sample is 1 byte (uint8_t).
     Returns the number of bytes captured.
     """
-    total_bytes_expected = DEFAULT_SAMPLE_RATE * 2 * duration_seconds
+    total_bytes_expected = DEFAULT_SAMPLE_RATE * 1 * duration_seconds
     chunk_size = 500
     total_captured = 0
 
@@ -176,21 +176,21 @@ def plot_waveform(filename=RAW_OUTPUT_FILE):
         print(f"\n  Error: '{filename}' not found. Record data first.")
         return
 
-    # Read raw 16-bit unsigned samples (little-endian)
+    # Read raw 8-bit unsigned samples
     with open(filename, "rb") as f:
         raw_bytes = f.read()
 
-    num_samples = len(raw_bytes) // 2
+    num_samples = len(raw_bytes)
     if num_samples == 0:
         print("\n  Error: Data file is empty.")
         return
 
-    # Unpack as little-endian uint16
-    samples = struct.unpack(f'<{num_samples}H', raw_bytes[:num_samples * 2])
+    # Unpack as uint8
+    samples = struct.unpack(f'{num_samples}B', raw_bytes)
     samples = np.array(samples, dtype=np.float64)
 
-    # Scale to signed: center at 2048, scale to ±1.0
-    samples_signed = (samples - 2048.0) / 2048.0
+    # Scale to signed: center at 128, scale to ±1.0
+    samples_signed = (samples - 128.0) / 128.0
 
     # Time axis
     duration = num_samples / DEFAULT_SAMPLE_RATE

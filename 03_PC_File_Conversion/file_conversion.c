@@ -61,7 +61,7 @@ int main() {
     header.bit_depth = 8;
     
     memcpy(header.data_header, "data", 4);
-    header.data_bytes = 50000; 
+    header.data_bytes = file_size; 
 
     // Write Header to the wav file
     fwrite(&header, sizeof(WavHeader), 1, wav_file);
@@ -71,7 +71,7 @@ int main() {
     
     while (fread(&raw_adc_value, sizeof(uint8_t), 1, raw_file) == 1) {
         
-        fwrite(&raw_adc_value, sizeof(int8_t), 1, wav_file);
+        fwrite(&raw_adc_value, sizeof(uint8_t), 1, wav_file);
     }
 
     // 3. Close the files and complete cleanup
