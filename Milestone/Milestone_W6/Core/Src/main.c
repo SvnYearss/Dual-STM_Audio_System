@@ -21,7 +21,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -44,17 +46,17 @@ UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-uint8_t pc_rx_byte;
-uint8_t ring_rx_byte;
+volatile uint8_t pc_rx_byte;
+volatile uint8_t ring_rx_byte;
 char pc_buffer[100];     // Array to build the PC string
 char ring_buffer[100];   // Array to build the Ring string
-int pc_index = 0;
-int ring_index = 0;
+volatile int pc_index = 0;
+volatile int ring_index = 0;
 
-int am_i_head = 0;
-int token_received = 0;
-int token_source = 0;
-int ring_halted = 0;     // Flag to freeze the board if checksum fails
+volatile int am_i_head = 0;
+volatile int token_received = 0;
+volatile int token_source = 0;
+volatile int ring_halted = 0;     // Flag to freeze the board if checksum fails
 
 // IMPORTANT: Change this for each team mate! (e.g., _22_2, _22_3, _22_4)
 char my_id[] = "_12_3";
@@ -71,9 +73,6 @@ static void MX_USART1_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-#include <string.h>
-#include <stdlib.h>
-#include <stdio.h>
 
 // Helper function to calculate XOR checksum of a string
 uint8_t calculate_checksum(char* str) {
@@ -372,7 +371,8 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
             pc_index = 0;               // Reset for the next round
             token_source = 1;
             token_received = 1;         // Now trigger the while(1) loop!
-        } else {
+        } else if (pc_rx_byte != '\r') {
+            // Filter out \r to prevent checksum mismatch with Python's .strip()
             // Memory overflow protection strictly preserved
             if (pc_index < 99) {
                 pc_buffer[pc_index++] = pc_rx_byte;
@@ -387,7 +387,8 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
             ring_index = 0;
             token_source = 2;
             token_received = 1;
-        } else {
+        } else if (ring_rx_byte != '\r') {
+            // Filter out \r to prevent checksum mismatch
             // Memory overflow protection strictly preserved
             if (ring_index < 99) {
                 ring_buffer[ring_index++] = ring_rx_byte;

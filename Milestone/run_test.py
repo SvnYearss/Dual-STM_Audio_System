@@ -14,7 +14,11 @@ ser = serial.Serial(port='COM4', baudrate=9600, bytesize=8, parity='N', stopbits
 print("Connected to:", ser.name)
 
 while (1):
-    message = input("Enter starting token (e.g., C): ")
+    message = input("Enter starting token (e.g., C), or 'q' to quit: ")
+    
+    if message.lower() == 'q':
+        print("Exiting...")
+        break
     
     # We must add the \n so the STM32 interrupt knows the word is finished
     ser.write((message + "\n").encode())
@@ -58,3 +62,6 @@ while (1):
         
         # A tiny delay to prevent the terminal from freezing
         time.sleep(0.1)
+
+ser.close()
+print("Serial port closed.")

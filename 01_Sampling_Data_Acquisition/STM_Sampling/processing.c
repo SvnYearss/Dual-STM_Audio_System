@@ -33,6 +33,21 @@ int main() {
         return 1;
     }
 
+    // 动态计算原始文件大小
+    fseek(raw_file, 0, SEEK_END);
+    long raw_file_size = ftell(raw_file);
+    rewind(raw_file);
+
+    if (raw_file_size <= 0) {
+        printf("Error: raw_ADC_values.data is empty or unreadable\n");
+        fclose(raw_file);
+        return 1;
+    }
+
+    // 每个原始采样点为 2 字节 (uint16_t)，输出也是 2 字节 (int16_t)
+    // 所以 WAV 数据区字节数等于原始文件大小
+    uint32_t data_bytes = (uint32_t)raw_file_size;
+
     // 创建我们要写入的 .wav 文件
     wav_file = fopen("output_audio.wav", "wb");
     if (wav_file == NULL) {
@@ -44,7 +59,8 @@ int main() {
     // 1. 初始化并写入 44 字节的 WAV Header
     WavHeader header;
     memcpy(header.riff_header, "RIFF", 4);
-    header.wav_size = 50000 + 44; 
+    // wav_size = 文件总大小 - 8 (不含 "RIFF" 标签和此字段本身)
+    header.wav_size = data_bytes + 36;
     memcpy(header.wave_header, "WAVE", 4);
     
     memcpy(header.fmt_header, "fmt ", 4);
@@ -57,7 +73,7 @@ int main() {
     header.bit_depth = 16;
     
     memcpy(header.data_header, "data", 4);
-    header.data_bytes = 50000; 
+    header.data_bytes = data_bytes;
 
     // 将 Header 写入 wav 文件
     fwrite(&header, sizeof(WavHeader), 1, wav_file);
@@ -84,6 +100,9 @@ int main() {
     fclose(wav_file);
 
     printf("Conversion successful! Saved as output_audio.wav\n");
+    printf("  Raw file size: %ld bytes\n", raw_file_size);
+    printf("  Samples: %ld\n", raw_file_size / 2);
+    printf("  Duration: %.2f seconds\n", (float)(raw_file_size / 2) / 6400.0f);
 
     return 0;
 }

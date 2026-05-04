@@ -52,15 +52,12 @@ UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-//use to store the temporary result of the latest ADC version
-uint16_t raw_ADC_value = 0;
-//broken to two bytes and store in 8-bit array
-uint8_t tx_buffer[2]={0};
-uint16_t temp = 0;
-//write the value of variable DC value
-char string_1[40]="\0";
+// Stores the latest 12-bit ADC conversion result (modified in ISR, must be volatile)
+volatile uint16_t raw_ADC_value = 0;
+// 2-byte array for splitting the 16-bit ADC value into bytes for UART TX
+uint8_t raw_ADC_value_bytes[2] = {0};
 uint8_t cmd_rx = 0;
-uint8_t system_state = '0';
+volatile uint8_t system_state = '0';
 uint32_t IC_Val1 = 0;
 uint32_t IC_Val2 = 0;
 uint32_t Difference = 0;
@@ -536,15 +533,25 @@ void HAL_TIM_PeriodElapsedCallback (TIM_HandleTypeDef* htim)
 {
   if (htim == &htim7)
   {
+    // Start ADC conversion
     HAL_ADC_Start(&hadc1);
-    HAL_ADC_PollForConversion(&hadc1,10);
+
+    // WARNING: Blocking poll inside ISR. Acceptable at 6400 Hz (156 us period)
+    // since ADC conversion at 2.5 cycles is very fast. For higher sample rates
+    // (e.g. 44 ksps), migrate to ADC interrupt mode (HAL_ADC_Start_IT) or DMA.
+    HAL_ADC_PollForConversion(&hadc1, 10);
+
+    // Get the unsigned 12-bit ADC data (range: 0 - 4095)
     raw_ADC_value = HAL_ADC_GetValue(&hadc1);
 
-    tx_buffer[0] = (uint8_t)(raw_ADC_value >> 8);
-    tx_buffer[1] = (uint8_t)(raw_ADC_value & 0xFF);
+    // Split 16-bit value into 2 bytes (little-endian) for UART transmission
+    raw_ADC_value_bytes[0] = (uint8_t)(raw_ADC_value & 0xFF);        // LSB
+    raw_ADC_value_bytes[1] = (uint8_t)((raw_ADC_value >> 8) & 0xFF); // MSB
 
-    HAL_UART_Transmit(&huart1, tx_buffer, 2, 10);
+    // Transmit 2 bytes of 12-bit ADC data through UART1
+    HAL_UART_Transmit(&huart1, raw_ADC_value_bytes, 2, 10);
 
+    // Stop ADC
     HAL_ADC_Stop(&hadc1);
   }
 
