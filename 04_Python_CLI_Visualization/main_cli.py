@@ -25,7 +25,8 @@ DEFAULT_BAUDRATE = 230400
 DEFAULT_SAMPLE_RATE = 22050   # Must match processing.c and STM32 timer config
 RAW_OUTPUT_FILE = "raw_ADC_values.data"
 WAV_OUTPUT_FILE = "output_audio.wav"
-CONVERTER_EXE = "file_conversion"   # Name of the compiled C executable (no .exe)
+CONVERTER_EXE = "file_conversion.exe"   # Name of the compiled C executable
+HARDCODED_PORT = "COM5"             # <-- CHANGE THIS TO YOUR ACTUAL COM PORT
 
 # STM32 command bytes (must match firmware HAL_UART_RxCpltCallback)
 CMD_MANUAL_START = b'M'
@@ -37,29 +38,9 @@ CMD_DISTANCE_MODE = b'D'
 # Utility: Auto-detect or select COM port
 # ---------------------------------------------------------------------------
 def select_com_port():
-    """List available COM ports and let the user choose one."""
-    ports = serial.tools.list_ports.comports()
-    if not ports:
-        print("  Error: No COM ports detected. Is the STM32 plugged in?")
-        return None
-
-    print("\n  Available COM Ports:")
-    for i, port in enumerate(ports):
-        print(f"    [{i + 1}] {port.device} — {port.description}")
-
-    if len(ports) == 1:
-        print(f"  Auto-selected: {ports[0].device}")
-        return ports[0].device
-
-    while True:
-        try:
-            choice = input(f"  Select port [1-{len(ports)}]: ").strip()
-            idx = int(choice) - 1
-            if 0 <= idx < len(ports):
-                return ports[idx].device
-        except (ValueError, IndexError):
-            pass
-        print("  Invalid selection, try again.")
+    """Return the hardcoded COM port."""
+    print(f"  Using hardcoded port: {HARDCODED_PORT}")
+    return HARDCODED_PORT
 
 
 # ---------------------------------------------------------------------------

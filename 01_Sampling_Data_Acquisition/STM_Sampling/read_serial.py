@@ -13,6 +13,10 @@ try:
                        parity="N", stopbits=1, timeout=5) as ser:
         print(f"Connected to: {ser.name}")
 
+        # Send 'M' command to STM32 to start sampling
+        ser.write(b'M')
+        print("Sent 'M' command to start STM32 sampling.")
+
         with open(OUTPUT_FILE, "wb") as file_1:
             for i in range(READ_ITERATIONS):
                 x = ser.read(READ_CHUNK_SIZE)
@@ -28,6 +32,10 @@ try:
 
         total_bytes = min((i + 1), READ_ITERATIONS) * READ_CHUNK_SIZE
         print(f"Done! Saved {total_bytes} bytes to {OUTPUT_FILE}")
+
+        # Send 'S' command to STM32 to stop sampling
+        ser.write(b'S')
+        print("Sent 'S' command to stop STM32 sampling.")
 
 except serial.SerialException as e:
     print(f"Serial error: {e}")
