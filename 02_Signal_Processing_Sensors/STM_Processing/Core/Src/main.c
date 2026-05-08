@@ -2,17 +2,7 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
+  * @brief          : Processing STM32 - Signal processing, sensor, command routing
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -31,7 +21,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-uint8_t rx_byte;
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -40,11 +30,34 @@ uint8_t rx_byte;
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+TIM_HandleTypeDef htim2;
+TIM_HandleTypeDef htim15;
+
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-uint8_t pc_rx_byte;
+uint8_t rx_byte;          // Byte received from Sampling STM (USART1)
+uint8_t pc_rx_byte;       // Byte received from PC (USART2)
+
+// HC-SR04 sensor
+TIM_HandleTypeDef htim2;
+TIM_HandleTypeDef htim15;
+volatile uint32_t IC_Val1 = 0;
+volatile uint32_t IC_Val2 = 0;
+volatile uint32_t Difference = 0;
+volatile uint8_t Is_First_Captured = 0;
+volatile uint32_t distance_um = 0;
+volatile uint8_t distance_ready = 0;
+
+// System state: 'S'=stop, 'M'=manual, 'D'=distance wait, 'R'=recording, 'T'=test
+volatile uint8_t system_state = 'S';
+
+// Distance trigger config
+uint32_t distance_threshold_um = 100000;  // Default 10cm = 100000um (configurable)
+#define DEBOUNCE_COUNT 3  // Require 3 consecutive readings to trigger/stop
+uint8_t trigger_count = 0;  // Consecutive in-range readings
+uint8_t release_count = 0;  // Consecutive out-of-range readings
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -52,12 +65,46 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_TIM15_Init(void);
+static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
-
+void HCSR04_Read(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+// Send a string via UART, one byte at a time
+static void uart_send_str(UART_HandleTypeDef *huart, const char *str)
+{
+	while (*str) {
+		HAL_UART_Transmit(huart, (uint8_t*)str, 1, 10);
+		str++;
+	}
+}
+
+// Manual uint32 to decimal string (no printf dependency)
+static char* u32_to_str(uint32_t val, char *buf, int buflen)
+{
+	buf[buflen - 1] = '\0';
+	int pos = buflen - 2;
+	if (val == 0) {
+		buf[pos] = '0';
+		return &buf[pos];
+	}
+	while (val > 0 && pos >= 0) {
+		buf[pos--] = '0' + (val % 10);
+		val /= 10;
+	}
+	return &buf[pos + 1];
+}
+
+void HCSR04_Read(void)
+{
+	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_SET);
+	for (volatile int i = 0; i < 300; i++) {}  // ~10us delay at 32MHz
+	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_RESET);
+}
 
 /* USER CODE END 0 */
 
@@ -92,7 +139,26 @@ int main(void)
   MX_GPIO_Init();
   MX_USART2_UART_Init();
   MX_USART1_UART_Init();
+  MX_TIM15_Init();
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
+
+  // Configure PB5 as GPIO output for HC-SR04 trigger
+  {
+	  GPIO_InitTypeDef GPIO_InitStruct = {0};
+	  __HAL_RCC_GPIOB_CLK_ENABLE();
+	  GPIO_InitStruct.Pin = GPIO_PIN_5;
+	  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+	  GPIO_InitStruct.Pull = GPIO_NOPULL;
+	  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+	  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_RESET);
+  }
+
+  // Init timers for HC-SR04
+  HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1);
+
+  // Start UART receive on both ports
   HAL_UART_Receive_IT(&huart1, &rx_byte, 1);
   HAL_UART_Receive_IT(&huart2, &pc_rx_byte, 1);
   /* USER CODE END 2 */
@@ -104,6 +170,72 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+
+	  // === Distance reporting (Test Mode) ===
+	  if (system_state == 'T' && distance_ready)
+	  {
+		  distance_ready = 0;
+		  uint32_t d = distance_um;
+		  uint32_t cm_whole = d / 10000;
+		  uint32_t cm_frac  = (d % 10000) / 100;
+		  char tmp[12];
+
+		  // Send distance directly to PC via USART2 (bypasses moving average)
+		  uart_send_str(&huart2, "DIST:");
+		  uart_send_str(&huart2, u32_to_str(cm_whole, tmp, sizeof(tmp)));
+		  uart_send_str(&huart2, ".");
+		  if (cm_frac < 10) uart_send_str(&huart2, "0");
+		  uart_send_str(&huart2, u32_to_str(cm_frac, tmp, sizeof(tmp)));
+		  uart_send_str(&huart2, "\r\n");
+	  }
+
+	  // === Distance Trigger Mode: auto start/stop with debounce ===
+	  if (system_state == 'D' && distance_ready)
+	  {
+		  distance_ready = 0;
+		  if (distance_um > 0 && distance_um <= distance_threshold_um)
+		  {
+			  trigger_count++;
+			  release_count = 0;
+			  if (trigger_count >= DEBOUNCE_COUNT)
+			  {
+				  system_state = 'R';
+				  trigger_count = 0;
+				  uint8_t cmd = 'M';
+				  HAL_UART_Transmit(&huart1, &cmd, 1, 10);
+				  uart_send_str(&huart2, "REC_START\r\n");
+			  }
+		  }
+		  else
+		  {
+			  trigger_count = 0;
+		  }
+	  }
+	  else if (system_state == 'R' && distance_ready)
+	  {
+		  distance_ready = 0;
+		  if (distance_um > distance_threshold_um)
+		  {
+			  release_count++;
+			  trigger_count = 0;
+			  if (release_count >= DEBOUNCE_COUNT)
+			  {
+				  system_state = 'D';
+				  release_count = 0;
+				  uint8_t cmd = 'S';
+				  HAL_UART_Transmit(&huart1, &cmd, 1, 10);
+				  uart_send_str(&huart2, "REC_STOP\r\n");
+			  }
+		  }
+		  else
+		  {
+			  release_count = 0;
+		  }
+	  }
+	  else if (distance_ready)
+	  {
+		  distance_ready = 0;  // Clear flag in other modes
+	  }
   }
   /* USER CODE END 3 */
 }
@@ -166,6 +298,100 @@ void SystemClock_Config(void)
   /** Enable MSI Auto calibration
   */
   HAL_RCCEx_EnableMSIPLLMode();
+}
+
+/**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_IC_InitTypeDef sConfigIC = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 32-1;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 4294967295;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_IC_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_BOTHEDGE;
+  sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
+  sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
+  sConfigIC.ICFilter = 0;
+  if (HAL_TIM_IC_ConfigChannel(&htim2, &sConfigIC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
+
+}
+
+/**
+  * @brief TIM15 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM15_Init(void)
+{
+
+  /* USER CODE BEGIN TIM15_Init 0 */
+
+  /* USER CODE END TIM15_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM15_Init 1 */
+
+  /* USER CODE END TIM15_Init 1 */
+  htim15.Instance = TIM15;
+  htim15.Init.Prescaler = 32000-1;
+  htim15.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim15.Init.Period = 500-1;
+  htim15.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim15.Init.RepetitionCounter = 0;
+  htim15.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim15) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim15, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim15, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM15_Init 2 */
+
+  /* USER CODE END TIM15_Init 2 */
+
 }
 
 /**
@@ -256,14 +482,14 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, LD3_Pin|HCSR04_TRIG_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : LD3_Pin */
-  GPIO_InitStruct.Pin = LD3_Pin;
+  /*Configure GPIO pins : LD3_Pin HCSR04_TRIG_Pin */
+  GPIO_InitStruct.Pin = LD3_Pin|HCSR04_TRIG_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(LD3_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -271,30 +497,109 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+// --- Timer Callbacks ---
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
+{
+	if (htim == &htim15)
+	{
+		// Trigger HC-SR04 read every 500ms
+		if (system_state == 'D' || system_state == 'T' || system_state == 'R')
+		{
+			HCSR04_Read();
+		}
+	}
+}
+
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
+{
+	if (htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1)
+	{
+		if (system_state != 'T' && system_state != 'D' && system_state != 'R')
+		{
+			Is_First_Captured = 0;
+			return;
+		}
+
+		if (Is_First_Captured == 0)
+		{
+			IC_Val1 = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+			Is_First_Captured = 1;
+		}
+		else
+		{
+			IC_Val2 = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+
+			if (IC_Val2 > IC_Val1)
+				Difference = IC_Val2 - IC_Val1;
+			else
+				Difference = (0xFFFFFFFF - IC_Val1) + IC_Val2 + 1;
+
+			// distance_um = Difference_us * 343 / 20 (integer, no float)
+			// TIM2 @ 1MHz, so Difference = time in microseconds
+			distance_um = (Difference * 343) / 20;
+			Is_First_Captured = 0;
+			distance_ready = 1;
+		}
+	}
+}
+
+// --- UART Callbacks ---
+
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-	if (huart->Instance == USART1){
+	if (huart->Instance == USART1)
+	{
+		// Data from Sampling STM32 (ADC bytes)
+		// Apply 3-sample moving average only during recording modes
+		if (system_state == 'M' || system_state == 'R')
+		{
+			static uint8_t buffer[3] = {0, 0, 0};
+			static uint8_t index = 0;
 
-		static uint8_t buffer [3] = {0, 0, 0};
-		static uint8_t index = 0;
+			buffer[index] = rx_byte;
+			index = (index + 1) % 3;
 
-		buffer[index] = rx_byte;
-		index = (index + 1) % 3;
+			uint16_t sum = buffer[0] + buffer[1] + buffer[2];
+			uint8_t average = (uint8_t)(sum / 3);
 
-		uint16_t sum = buffer[0] + buffer[1] + buffer[2];
-		uint8_t average = (uint8_t)(sum/3);
-
-		HAL_UART_Transmit_IT(&huart2, &average, 1);
+			HAL_UART_Transmit_IT(&huart2, &average, 1);
+		}
 
 		HAL_UART_Receive_IT(&huart1, &rx_byte, 1);
 	}
-
-	else if(huart->Instance == USART2)
+	else if (huart->Instance == USART2)
 	{
-		HAL_UART_Transmit_IT(&huart1, &pc_rx_byte, 1);
+		// Command from PC
+		if (pc_rx_byte == 'M')
+		{
+			system_state = 'M';
+			HAL_TIM_Base_Stop_IT(&htim15);
+			// Forward 'M' to Sampling STM to start ADC
+			HAL_UART_Transmit_IT(&huart1, &pc_rx_byte, 1);
+		}
+		else if (pc_rx_byte == 'S')
+		{
+			system_state = 'S';
+			HAL_TIM_Base_Stop_IT(&htim15);
+			// Forward 'S' to Sampling STM to stop ADC
+			HAL_UART_Transmit_IT(&huart1, &pc_rx_byte, 1);
+		}
+		else if (pc_rx_byte == 'D')
+		{
+			// Distance Trigger Mode - handled locally, don't forward
+			system_state = 'D';
+			HAL_TIM_Base_Start_IT(&htim15);
+		}
+		else if (pc_rx_byte == 'T')
+		{
+			// Distance Test Mode - handled locally, don't forward
+			system_state = 'T';
+			HAL_TIM_Base_Start_IT(&htim15);
+		}
 
-		HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin); // To tell it received and transmitted a message
-
+		HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);
 		HAL_UART_Receive_IT(&huart2, &pc_rx_byte, 1);
 	}
 }
@@ -327,7 +632,7 @@ void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */
   /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+    ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */

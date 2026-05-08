@@ -43,7 +43,6 @@
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
 
-TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim6;
 TIM_HandleTypeDef htim7;
 TIM_HandleTypeDef htim15;
@@ -52,16 +51,9 @@ UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-//use to store the temporary result of the latest ADC version
-uint16_t raw_ADC_value = 0;
-
-uint8_t cmd_rx = 0;
-uint8_t system_state = '0';
-uint32_t IC_Val1 = 0;
-uint32_t IC_Val2 = 0;
-uint32_t Difference = 0;
-uint8_t Is_First_Captured = 0;
-float distance = 0.0;
+volatile uint16_t raw_ADC_value = 0;
+volatile uint8_t cmd_rx = 0;
+volatile uint8_t system_state = 'S';
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -71,12 +63,10 @@ static void MX_USART2_UART_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_TIM7_Init(void);
 static void MX_USART1_UART_Init(void);
-static void MX_TIM2_Init(void);
 static void MX_TIM6_Init(void);
 static void MX_TIM15_Init(void);
 /* USER CODE BEGIN PFP */
-void delay_uS(uint16_t delay);
-void HCSR04_Read();
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -117,13 +107,10 @@ int main(void)
   MX_ADC1_Init();
   MX_TIM7_Init();
   MX_USART1_UART_Init();
-  MX_TIM2_Init();
   MX_TIM6_Init();
   MX_TIM15_Init();
   /* USER CODE BEGIN 2 */
-  HAL_TIM_Base_Start(&htim6);
-  HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1);
-  HAL_UART_Receive_IT(&huart1, &cmd_rx, 1);
+  HAL_UART_Receive_IT(&huart1, (uint8_t*)&cmd_rx, 1);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -256,54 +243,6 @@ static void MX_ADC1_Init(void)
 }
 
 /**
-  * @brief TIM2 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_TIM2_Init(void)
-{
-
-  /* USER CODE BEGIN TIM2_Init 0 */
-
-  /* USER CODE END TIM2_Init 0 */
-
-  TIM_MasterConfigTypeDef sMasterConfig = {0};
-  TIM_IC_InitTypeDef sConfigIC = {0};
-
-  /* USER CODE BEGIN TIM2_Init 1 */
-
-  /* USER CODE END TIM2_Init 1 */
-  htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 32-1;
-  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 4294967295;
-  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_IC_Init(&htim2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_BOTHEDGE;
-  sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
-  sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
-  sConfigIC.ICFilter = 0;
-  if (HAL_TIM_IC_ConfigChannel(&htim2, &sConfigIC, TIM_CHANNEL_1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN TIM2_Init 2 */
-
-  /* USER CODE END TIM2_Init 2 */
-
-}
-
-/**
   * @brief TIM6 Initialization Function
   * @param None
   * @retval None
@@ -359,9 +298,9 @@ static void MX_TIM7_Init(void)
 
   /* USER CODE END TIM7_Init 1 */
   htim7.Instance = TIM7;
-  htim7.Init.Prescaler = 31;
+  htim7.Init.Prescaler = 50-1;
   htim7.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim7.Init.Period = 124;
+  htim7.Init.Period = 100-1;
   htim7.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim7) != HAL_OK)
   {
@@ -398,9 +337,9 @@ static void MX_TIM15_Init(void)
 
   /* USER CODE END TIM15_Init 1 */
   htim15.Instance = TIM15;
-  htim15.Init.Prescaler = 32000-1;
+  htim15.Init.Prescaler = 0;
   htim15.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim15.Init.Period = 500-1;
+  htim15.Init.Period = 65535;
   htim15.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim15.Init.RepetitionCounter = 0;
   htim15.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
@@ -513,14 +452,14 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, LD3_Pin|GPIO_PIN_5, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : LD3_Pin PB5 */
-  GPIO_InitStruct.Pin = LD3_Pin|GPIO_PIN_5;
+  /*Configure GPIO pin : LD3_Pin */
+  GPIO_InitStruct.Pin = LD3_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  HAL_GPIO_Init(LD3_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -528,107 +467,40 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-void HAL_TIM_PeriodElapsedCallback (TIM_HandleTypeDef* htim)
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 {
-  if (htim == &htim7)
-  {
-    HAL_ADC_Start(&hadc1);
-    HAL_ADC_PollForConversion(&hadc1, 10);
-    // Get the unsigned 12-bit ADC data (range: 0 - 4095)
-    raw_ADC_value = HAL_ADC_GetValue(&hadc1);
+	if (htim == &htim7)
+	{
+		HAL_ADC_Start(&hadc1);
+		HAL_ADC_PollForConversion(&hadc1, 10);
+		raw_ADC_value = HAL_ADC_GetValue(&hadc1);
 
-    // Compress 12-bit value into 8-bit for MVP transmission
-    uint8_t sample_8bit = (uint8_t)(raw_ADC_value >> 4);
+		// Compress 12-bit value into 8-bit for transmission
+		uint8_t sample_8bit = (uint8_t)(raw_ADC_value >> 4);
 
-    // Transmit 1 byte of 8-bit ADC data through UART1
-    HAL_UART_Transmit(&huart1, &sample_8bit, 1, 10);
-    HAL_ADC_Stop(&hadc1);
-  }
-
-  if (htim == &htim15)
-  {
-	  if (system_state == 'D')
-	  {
-		  HCSR04_Read();
-	  }
-	  else if (system_state == 'D_RECORDING')
-	  {
-		  HCSR04_Read(); // Keep reading distance even while recording
-	  }
-  }
+		// Transmit 1 byte of 8-bit ADC data through UART1 to Processing STM
+		HAL_UART_Transmit(&huart1, &sample_8bit, 1, 10);
+		HAL_ADC_Stop(&hadc1);
+	}
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
 	if (huart->Instance == USART1)
 	{
-		if(cmd_rx == 'M')
+		if (cmd_rx == 'M')
 		{
 			system_state = 'M';
-			HAL_TIM_Base_Stop_IT(&htim15);
 			HAL_TIM_Base_Start_IT(&htim7);
 		}
 		else if (cmd_rx == 'S')
 		{
 			system_state = 'S';
 			HAL_TIM_Base_Stop_IT(&htim7);
-			HAL_TIM_Base_Stop_IT(&htim15);
-		}
-		else if (cmd_rx == 'D')
-		{
-			system_state = 'D';
-			HAL_TIM_Base_Start_IT(&htim15);
 		}
 
-		HAL_UART_Receive_IT(&huart1, &cmd_rx, 1);
+		HAL_UART_Receive_IT(&huart1, (uint8_t*)&cmd_rx, 1);
 	}
-}
-
-
-void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
-{
-	if (htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1)
-	{
-		if (Is_First_Captured == 0)
-		{
-			IC_Val1 = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
-			Is_First_Captured = 1;
-		}
-		else if (Is_First_Captured == 1)
-		{
-			IC_Val2 = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
-
-			Difference = IC_Val2 - IC_Val1;
-
-			distance = Difference * 0.0343 / 2.0;
-			Is_First_Captured = 0;
-
-			if (system_state == 'D' && distance > 0.0 && distance <= 10.0)
-			{
-				system_state = 'D_RECORDING';
-				// Start sampling but DO NOT stop htim15 so we can detect when to stop
-				HAL_TIM_Base_Start_IT(&htim7);
-			}
-			else if (system_state == 'D_RECORDING' && distance > 10.0)
-			{
-				system_state = 'D'; // Go back to waiting
-				HAL_TIM_Base_Stop_IT(&htim7); // Stop sampling
-			}
-		}
-	}
-}
-
-void delay_uS(uint16_t delay)
-{
-	__HAL_TIM_SET_COUNTER(&htim6, 0);
-	while(__HAL_TIM_GET_COUNTER(&htim6) < delay) {}
-}
-
-void HCSR04_Read()
-{
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_SET);
-    delay_uS(10);
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_RESET);
 }
 /* USER CODE END 4 */
 

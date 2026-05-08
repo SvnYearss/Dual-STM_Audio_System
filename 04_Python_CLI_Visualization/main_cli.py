@@ -107,46 +107,59 @@ def distance_trigger_mode():
     print("\n--- Distance Trigger Mode ---")
     options = get_output_preferences()
     
-    print("\n[Distance Mode] Waiting for proximity trigger (Press Ctrl+C to exit mode)...")
+    print("\n[Distance Mode] The system will auto-record when an object is within 10cm.")
+    print("Press Ctrl+C to exit mode.\n")
     
+    ser = None
     try:
-        with serial.Serial(PORT, BAUD, timeout=1) as ser:
-            ser.write(b'D') # Put STM32 into Distance mode
+        import time
+        ser = serial.Serial(PORT, BAUD, timeout=1)
+        ser.reset_input_buffer()
+        # Ensure clean state before entering distance mode
+        ser.write(b'S')
+        time.sleep(0.3)
+        ser.reset_input_buffer()
+        ser.write(b'D')  # Put Processing STM into Distance Trigger mode
+        
+        trigger_num = 0
+        
+        while True:
+            print("[Distance Mode] Waiting for proximity trigger...")
             
-            while True:
-                # Read 1 byte to detect if STM32 started sending data
-                trigger_byte = ser.read(1)
+            # Wait for first byte (= sensor triggered, ADC data flowing)
+            trigger_byte = ser.read(1)
+            
+            if trigger_byte:
+                trigger_num += 1
+                print(f"\n[!] Trigger #{trigger_num} detected! Recording started...")
+                raw_data = trigger_byte
                 
-                if trigger_byte:
-                    print("\n[!] Trigger detected! Recording started...")
-                    raw_data = trigger_byte
-                    
-                    # Keep reading chunks until STM32 stops sending (timeout)
-                    while True:
-                        chunk = ser.read(8000)
-                        if chunk:
-                            raw_data += chunk
-                        else:
-                            # Timeout hit, meaning object left and STM32 stopped sampling
-                            print("[!] Object left. Recording stopped.")
-                            break
-                    
-                    print(f"Captured {len(raw_data)} bytes of audio.")
-                    if options and len(raw_data) > 0:
-                        process_outputs(raw_data, options, "Distance Mode")
-                    
-                    print("\n[Distance Mode] Waiting for next trigger (Press Ctrl+C to exit)...")
+                # Keep reading until timeout (= object left, data stopped)
+                while True:
+                    chunk = ser.read(8000)
+                    if chunk:
+                        raw_data += chunk
+                    else:
+                        print("[!] Object left. Recording stopped.")
+                        break
+                
+                print(f"Captured {len(raw_data)} bytes of audio.")
+                if options and len(raw_data) > 0:
+                    process_outputs(raw_data, options, f"Distance Trigger #{trigger_num}")
+                
+                print()
                     
     except KeyboardInterrupt:
         print("\nExiting Distance Trigger Mode.")
-        # Send S just in case
-        try:
-            with serial.Serial(PORT, BAUD, timeout=1) as ser:
-                ser.write(b'S')
-        except:
-            pass
     except Exception as e:
         print(f"Serial Error: {e}")
+    finally:
+        if ser and ser.is_open:
+            try:
+                ser.write(b'S')
+            except:
+                pass
+            ser.close()
 
 # --- CLI Main Program Architecture ---
 if __name__ == "__main__":
