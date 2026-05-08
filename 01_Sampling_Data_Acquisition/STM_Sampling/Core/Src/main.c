@@ -551,6 +551,10 @@ void HAL_TIM_PeriodElapsedCallback (TIM_HandleTypeDef* htim)
 	  {
 		  HCSR04_Read();
 	  }
+	  else if (system_state == 'D_RECORDING')
+	  {
+		  HCSR04_Read(); // Keep reading distance even while recording
+	  }
   }
 }
 
@@ -601,9 +605,14 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 
 			if (system_state == 'D' && distance > 0.0 && distance <= 10.0)
 			{
-				system_state = 'M';
-				HAL_TIM_Base_Stop_IT(&htim15);
+				system_state = 'D_RECORDING';
+				// Start sampling but DO NOT stop htim15 so we can detect when to stop
 				HAL_TIM_Base_Start_IT(&htim7);
+			}
+			else if (system_state == 'D_RECORDING' && distance > 10.0)
+			{
+				system_state = 'D'; // Go back to waiting
+				HAL_TIM_Base_Stop_IT(&htim7); // Stop sampling
 			}
 		}
 	}
