@@ -21,6 +21,14 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define AUDIO_INPUT_RATE_HZ        44077U
+#define AUDIO_OUTPUT_RATE_HZ       (AUDIO_INPUT_RATE_HZ / 2U)
+#define SPI_LINK_CMD_START         ((uint16_t)'M')
+#define SPI_LINK_CMD_STOP          ((uint16_t)'S')
+#define SPI_LINK_SAMPLE_MASK       0x03FFU
+#define AUDIO_FILTER_LEN           5U
+#define OUTLIER_THRESHOLD_10BIT    160U
+#define OUTLIER_RECOVERY_COUNT     4U
 
 /* USER CODE END PD */
 
@@ -30,6 +38,8 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+SPI_HandleTypeDef hspi1;
+
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim15;
 
@@ -37,12 +47,9 @@ UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-uint8_t rx_byte;          // Byte received from Sampling STM (USART1)
 uint8_t pc_rx_byte;       // Byte received from PC (USART2)
 
 // HC-SR04 sensor
-TIM_HandleTypeDef htim2;
-TIM_HandleTypeDef htim15;
 volatile uint32_t IC_Val1 = 0;
 volatile uint32_t IC_Val2 = 0;
 volatile uint32_t Difference = 0;
@@ -58,17 +65,38 @@ uint32_t distance_threshold_um = 100000;  // Default 10cm = 100000um (configurab
 #define DEBOUNCE_COUNT 3  // Require 3 consecutive readings to trigger/stop
 uint8_t trigger_count = 0;  // Consecutive in-range readings
 uint8_t release_count = 0;  // Consecutive out-of-range readings
+volatile uint8_t pc_pending_threshold_byte = 0;
+
+volatile uint16_t spi_tx_command = SPI_LINK_CMD_STOP;
+volatile uint32_t spi_rx_sample_count = 0;
+volatile uint32_t spi_overrun_count = 0;
+volatile uint32_t pc_uart_drop_count = 0;
+
+static uint16_t ma_buffer[AUDIO_FILTER_LEN] = {0};
+static uint32_t ma_sum = 0;
+static uint8_t ma_index = 0;
+static uint8_t ma_count = 0;
+static uint8_t downsample_phase = 0;
+static uint8_t outlier_run_count = 0;
+static uint16_t last_outlier_sample = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_USART2_UART_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_TIM15_Init(void);
 static void MX_TIM2_Init(void);
+static void MX_SPI1_Init(void);
+static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 void HCSR04_Read(void);
+static void SPI1_Link_Slave_Init(void);
+static void SPI1_Link_SetCommand(uint16_t command);
+static void AudioFilter_Reset(void);
+static void AudioFilter_Prime(uint16_t sample_10bit);
+static void AudioFilter_ProcessSample(uint16_t sample_10bit);
+static void PC_UART_SendAudioByte(uint8_t sample_8bit);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -101,9 +129,161 @@ static char* u32_to_str(uint32_t val, char *buf, int buflen)
 
 void HCSR04_Read(void)
 {
-	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_SET);
+	HAL_GPIO_WritePin(HCSR04_TRIG_GPIO_Port, HCSR04_TRIG_Pin, GPIO_PIN_SET);
 	for (volatile int i = 0; i < 300; i++) {}  // ~10us delay at 32MHz
-	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_RESET);
+	HAL_GPIO_WritePin(HCSR04_TRIG_GPIO_Port, HCSR04_TRIG_Pin, GPIO_PIN_RESET);
+}
+
+static void SPI1_Link_Slave_Init(void)
+{
+	GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+	__HAL_RCC_GPIOB_CLK_ENABLE();
+	__HAL_RCC_SPI1_CLK_ENABLE();
+
+	/*
+	 * Inter-board SPI link:
+	 * PB3 = SPI1_SCK, PB4 = SPI1_MISO, PB5 = SPI1_MOSI, AF5.
+	 * This board is the slave; the Sampling STM clocks one 16-bit word per
+	 * 44 kHz sample and reads the command word returned on MISO.
+	 */
+	GPIO_InitStruct.Pin = GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5;
+	GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+	GPIO_InitStruct.Pull = GPIO_NOPULL;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+	GPIO_InitStruct.Alternate = GPIO_AF5_SPI1;
+	HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+	SPI1->CR1 = 0U;
+	SPI1->CR2 = 0U;
+	SPI1->CR1 = SPI_CR1_SSM;
+	SPI1->CR2 = (15U << SPI_CR2_DS_Pos) | SPI_CR2_RXNEIE | SPI_CR2_ERRIE;
+	SPI1->CR1 |= SPI_CR1_SPE;
+	*((__IO uint16_t *)&SPI1->DR) = spi_tx_command;
+
+	HAL_NVIC_SetPriority(SPI1_IRQn, 0, 0);
+	HAL_NVIC_EnableIRQ(SPI1_IRQn);
+}
+
+static void SPI1_Link_SetCommand(uint16_t command)
+{
+	spi_tx_command = command;
+	if ((SPI1->SR & SPI_SR_TXE) != 0U)
+	{
+		*((__IO uint16_t *)&SPI1->DR) = spi_tx_command;
+	}
+}
+
+static void AudioFilter_Reset(void)
+{
+	uint32_t primask = __get_PRIMASK();
+	__disable_irq();
+
+	for (uint8_t i = 0; i < AUDIO_FILTER_LEN; i++)
+	{
+		ma_buffer[i] = 0;
+	}
+	ma_sum = 0;
+	ma_index = 0;
+	ma_count = 0;
+	downsample_phase = 0;
+	outlier_run_count = 0;
+	last_outlier_sample = 0;
+
+	if (primask == 0U)
+	{
+		__enable_irq();
+	}
+}
+
+static void AudioFilter_Prime(uint16_t sample_10bit)
+{
+	ma_sum = 0;
+	for (uint8_t i = 0; i < AUDIO_FILTER_LEN; i++)
+	{
+		ma_buffer[i] = sample_10bit;
+		ma_sum += sample_10bit;
+	}
+	ma_index = 0;
+	ma_count = AUDIO_FILTER_LEN;
+	outlier_run_count = 0;
+	last_outlier_sample = sample_10bit;
+}
+
+static void PC_UART_SendAudioByte(uint8_t sample_8bit)
+{
+	if ((USART2->ISR & USART_ISR_TXE) != 0U)
+	{
+		USART2->TDR = sample_8bit;
+	}
+	else
+	{
+		pc_uart_drop_count++;
+	}
+}
+
+static void AudioFilter_ProcessSample(uint16_t sample_10bit)
+{
+	sample_10bit &= SPI_LINK_SAMPLE_MASK;
+
+	uint16_t mean = (ma_count > 0U) ? (uint16_t)(ma_sum / ma_count) : sample_10bit;
+	uint16_t diff = (sample_10bit > mean) ? (sample_10bit - mean) : (mean - sample_10bit);
+	uint16_t accepted_sample = sample_10bit;
+
+	if ((ma_count >= AUDIO_FILTER_LEN) && (diff > OUTLIER_THRESHOLD_10BIT))
+	{
+		uint16_t outlier_step = (sample_10bit > last_outlier_sample)
+			? (sample_10bit - last_outlier_sample)
+			: (last_outlier_sample - sample_10bit);
+
+		// Several similar outliers in a row are a real level change, not a spike.
+		if ((outlier_run_count > 0U) && (outlier_step <= OUTLIER_THRESHOLD_10BIT))
+		{
+			outlier_run_count++;
+		}
+		else
+		{
+			outlier_run_count = 1;
+		}
+		last_outlier_sample = sample_10bit;
+
+		if (outlier_run_count >= OUTLIER_RECOVERY_COUNT)
+		{
+			AudioFilter_Prime(sample_10bit);
+			accepted_sample = sample_10bit;
+		}
+		else
+		{
+			accepted_sample = mean;
+		}
+	}
+	else
+	{
+		outlier_run_count = 0;
+		last_outlier_sample = sample_10bit;
+	}
+
+	if (ma_count < AUDIO_FILTER_LEN)
+	{
+		ma_buffer[ma_index] = accepted_sample;
+		ma_sum += accepted_sample;
+		ma_count++;
+	}
+	else
+	{
+		ma_sum -= ma_buffer[ma_index];
+		ma_buffer[ma_index] = accepted_sample;
+		ma_sum += accepted_sample;
+	}
+
+	ma_index = (uint8_t)((ma_index + 1U) % AUDIO_FILTER_LEN);
+
+	downsample_phase ^= 1U;
+	if (downsample_phase == 0U)
+	{
+		uint16_t filtered = (uint16_t)(ma_sum / ma_count);
+		PC_UART_SendAudioByte((uint8_t)(filtered >> 2));
+	}
 }
 
 /* USER CODE END 0 */
@@ -137,29 +317,30 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_USART2_UART_Init();
   MX_USART1_UART_Init();
   MX_TIM15_Init();
   MX_TIM2_Init();
+  MX_SPI1_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
 
-  // Configure PB5 as GPIO output for HC-SR04 trigger
+  // Configure HC-SR04 trigger on PA4; echo is PA5/TIM2_CH1.
   {
 	  GPIO_InitTypeDef GPIO_InitStruct = {0};
-	  __HAL_RCC_GPIOB_CLK_ENABLE();
-	  GPIO_InitStruct.Pin = GPIO_PIN_5;
+	  __HAL_RCC_GPIOA_CLK_ENABLE();
+	  GPIO_InitStruct.Pin = HCSR04_TRIG_Pin;
 	  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
 	  GPIO_InitStruct.Pull = GPIO_NOPULL;
 	  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-	  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_RESET);
+	  HAL_GPIO_Init(HCSR04_TRIG_GPIO_Port, &GPIO_InitStruct);
+	  HAL_GPIO_WritePin(HCSR04_TRIG_GPIO_Port, HCSR04_TRIG_Pin, GPIO_PIN_RESET);
   }
 
   // Init timers for HC-SR04
   HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1);
+  SPI1_Link_Slave_Init();
 
-  // Start UART receive on both ports
-  HAL_UART_Receive_IT(&huart1, &rx_byte, 1);
+  // Start UART receive from the PC. Inter-board audio now uses SPI1.
   HAL_UART_Receive_IT(&huart2, &pc_rx_byte, 1);
   /* USER CODE END 2 */
 
@@ -201,9 +382,8 @@ int main(void)
 			  {
 				  system_state = 'R';
 				  trigger_count = 0;
-				  uint8_t cmd = 'M';
-				  HAL_UART_Transmit(&huart1, &cmd, 1, 10);
-				  uart_send_str(&huart2, "REC_START\r\n");
+				  SPI1_Link_SetCommand(SPI_LINK_CMD_START);
+				  AudioFilter_Reset();
 			  }
 		  }
 		  else
@@ -222,9 +402,8 @@ int main(void)
 			  {
 				  system_state = 'D';
 				  release_count = 0;
-				  uint8_t cmd = 'S';
-				  HAL_UART_Transmit(&huart1, &cmd, 1, 10);
-				  uart_send_str(&huart2, "REC_STOP\r\n");
+				  SPI1_Link_SetCommand(SPI_LINK_CMD_STOP);
+				  AudioFilter_Reset();
 			  }
 		  }
 		  else
@@ -298,6 +477,45 @@ void SystemClock_Config(void)
   /** Enable MSI Auto calibration
   */
   HAL_RCCEx_EnableMSIPLLMode();
+}
+
+/**
+  * @brief SPI1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_SPI1_Init(void)
+{
+
+  /* USER CODE BEGIN SPI1_Init 0 */
+
+  /* USER CODE END SPI1_Init 0 */
+
+  /* USER CODE BEGIN SPI1_Init 1 */
+
+  /* USER CODE END SPI1_Init 1 */
+  /* SPI1 parameter configuration*/
+  hspi1.Instance = SPI1;
+  hspi1.Init.Mode = SPI_MODE_SLAVE;
+  hspi1.Init.Direction = SPI_DIRECTION_2LINES;
+  hspi1.Init.DataSize = SPI_DATASIZE_16BIT;
+  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi1.Init.NSS = SPI_NSS_SOFT;
+  hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
+  hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
+  hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+  hspi1.Init.CRCPolynomial = 7;
+  hspi1.Init.CRCLength = SPI_CRC_LENGTH_DATASIZE;
+  hspi1.Init.NSSPMode = SPI_NSS_PULSE_DISABLE;
+  if (HAL_SPI_Init(&hspi1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN SPI1_Init 2 */
+
+  /* USER CODE END SPI1_Init 2 */
+
 }
 
 /**
@@ -445,7 +663,7 @@ static void MX_USART2_UART_Init(void)
 
   /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = 230400;
+  huart2.Init.BaudRate = 921600;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;
@@ -482,14 +700,14 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, LD3_Pin|HCSR04_TRIG_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : LD3_Pin HCSR04_TRIG_Pin */
-  GPIO_InitStruct.Pin = LD3_Pin|HCSR04_TRIG_Pin;
+  /*Configure GPIO pin : PA4 */
+  GPIO_InitStruct.Pin = GPIO_PIN_4;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -545,61 +763,85 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 	}
 }
 
-// --- UART Callbacks ---
+// --- SPI and UART Callbacks ---
+
+void SPI1_IRQHandler(void)
+{
+	uint32_t sr = SPI1->SR;
+
+	if ((sr & SPI_SR_RXNE) != 0U)
+	{
+		uint16_t sample = *((__IO uint16_t *)&SPI1->DR);
+
+		if ((SPI1->SR & SPI_SR_TXE) != 0U)
+		{
+			*((__IO uint16_t *)&SPI1->DR) = spi_tx_command;
+		}
+
+		spi_rx_sample_count++;
+		if (system_state == 'M' || system_state == 'R')
+		{
+			AudioFilter_ProcessSample(sample);
+		}
+	}
+
+	if ((SPI1->SR & SPI_SR_OVR) != 0U)
+	{
+		volatile uint16_t clear_dr = *((__IO uint16_t *)&SPI1->DR);
+		volatile uint32_t clear_sr = SPI1->SR;
+		(void)clear_dr;
+		(void)clear_sr;
+		spi_overrun_count++;
+	}
+}
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-	if (huart->Instance == USART1)
-	{
-		// Data from Sampling STM32 (ADC bytes)
-		// Apply 3-sample moving average only during recording modes
-		if (system_state == 'M' || system_state == 'R')
-		{
-			static uint8_t buffer[3] = {0, 0, 0};
-			static uint8_t index = 0;
-
-			buffer[index] = rx_byte;
-			index = (index + 1) % 3;
-
-			uint16_t sum = buffer[0] + buffer[1] + buffer[2];
-			uint8_t average = (uint8_t)(sum / 3);
-
-			HAL_UART_Transmit_IT(&huart2, &average, 1);
-		}
-
-		HAL_UART_Receive_IT(&huart1, &rx_byte, 1);
-	}
-	else if (huart->Instance == USART2)
+	if (huart->Instance == USART2)
 	{
 		// Command from PC
-		if (pc_rx_byte == 'M')
+		if (pc_pending_threshold_byte)
+		{
+			if (pc_rx_byte > 0U)
+			{
+				distance_threshold_um = ((uint32_t)pc_rx_byte) * 10000U;
+			}
+			pc_pending_threshold_byte = 0;
+		}
+		else if (pc_rx_byte == 'C')
+		{
+			pc_pending_threshold_byte = 1;
+		}
+		else if (pc_rx_byte == 'M')
 		{
 			system_state = 'M';
 			HAL_TIM_Base_Stop_IT(&htim15);
-			// Forward 'M' to Sampling STM to start ADC
-			HAL_UART_Transmit_IT(&huart1, &pc_rx_byte, 1);
+			AudioFilter_Reset();
+			SPI1_Link_SetCommand(SPI_LINK_CMD_START);
 		}
 		else if (pc_rx_byte == 'S')
 		{
 			system_state = 'S';
 			HAL_TIM_Base_Stop_IT(&htim15);
-			// Forward 'S' to Sampling STM to stop ADC
-			HAL_UART_Transmit_IT(&huart1, &pc_rx_byte, 1);
+			AudioFilter_Reset();
+			SPI1_Link_SetCommand(SPI_LINK_CMD_STOP);
 		}
 		else if (pc_rx_byte == 'D')
 		{
-			// Distance Trigger Mode - handled locally, don't forward
+			// Distance Trigger Mode is handled locally; SPI carries start/stop to Sampling STM.
 			system_state = 'D';
+			AudioFilter_Reset();
+			SPI1_Link_SetCommand(SPI_LINK_CMD_STOP);
 			HAL_TIM_Base_Start_IT(&htim15);
 		}
 		else if (pc_rx_byte == 'T')
 		{
-			// Distance Test Mode - handled locally, don't forward
+			// Distance Test Mode is handled locally.
 			system_state = 'T';
+			SPI1_Link_SetCommand(SPI_LINK_CMD_STOP);
 			HAL_TIM_Base_Start_IT(&htim15);
 		}
 
-		HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);
 		HAL_UART_Receive_IT(&huart2, &pc_rx_byte, 1);
 	}
 }

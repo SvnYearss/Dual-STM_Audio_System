@@ -3,13 +3,25 @@ import subprocess
 import numpy as np
 import matplotlib.pyplot as plt
 import sys
+import os
+import time
 
 # --- Configuration Parameters ---
 PORT = 'COM5'
-BAUD = 230400
-FS = 8000  # Sampling rate from the STM32 configuration
+BAUD = 921600
+NOMINAL_FS = 22038  # Processing STM output rate after 44.077 ksps -> 2:1 downsample
+TEAM_ID = 'T12'
 
-def compile_and_run_c_converter(raw_data):
+def output_filename(mode_name, extension, sample_rate):
+    safe_mode = ''.join(c if c.isalnum() else '_' for c in mode_name).strip('_')
+    return f"{TEAM_ID}_{sample_rate}Hz_{safe_mode}.{extension}"
+
+def measured_sample_rate(byte_count, elapsed_seconds):
+    if elapsed_seconds <= 0 or byte_count <= 0:
+        return NOMINAL_FS
+    return max(1, int(round(byte_count / elapsed_seconds)))
+
+def compile_and_run_c_converter(raw_data, mode_name, sample_rate):
     """Saves binary data and calls the C converter to create a WAV file."""
     with open("raw_ADC_values.data", "wb") as f:
         f.write(raw_data)
@@ -19,21 +31,26 @@ def compile_and_run_c_converter(raw_data):
     print("  Running C converter...")
     # On Windows, the executable might be .exe
     exe_name = "converter.exe" if sys.platform == "win32" else "./converter"
-    subprocess.run([exe_name])
-    print("  -> Generated output.wav")
+    subprocess.run([exe_name, str(sample_rate)])
+    wav_name = output_filename(mode_name, "wav", sample_rate)
+    if os.path.exists("output.wav"):
+        os.replace("output.wav", wav_name)
+    print(f"  -> Generated {wav_name}")
 
-def generate_csv(data_array):
+def generate_csv(data_array, mode_name, sample_rate):
     """Generates a CSV file with the first row indicating the sample rate."""
+    csv_name = output_filename(mode_name, "csv", sample_rate)
     # The requirement specifically asks for the first row to indicate the sample rate
-    with open("audio_data.csv", "w") as f:
-        f.write(f"Sample Rate:,{FS}\n")
+    with open(csv_name, "w") as f:
+        f.write(f"Sample Rate:,{sample_rate}\n")
         f.write("Amplitude\n")
         np.savetxt(f, data_array, delimiter=",", fmt='%d')
-    print("  -> Generated audio_data.csv")
+    print(f"  -> Generated {csv_name}")
 
-def generate_png(data_array, mode_name):
+def generate_png(data_array, mode_name, sample_rate):
     """Generates a plot of amplitude vs time with proper labels."""
-    time_axis = np.arange(len(data_array)) / FS
+    png_name = output_filename(mode_name, "png", sample_rate)
+    time_axis = np.arange(len(data_array)) / sample_rate
     
     plt.figure(figsize=(10, 4))
     plt.plot(time_axis, data_array, color='blue', linewidth=0.5)
@@ -41,25 +58,26 @@ def generate_png(data_array, mode_name):
     plt.xlabel("Time (seconds)")
     plt.ylabel("Amplitude (8-bit PCM)")
     plt.grid(True)
-    plt.savefig("waveform.png")
+    plt.savefig(png_name)
     plt.close()
-    print("  -> Generated waveform.png")
+    print(f"  -> Generated {png_name}")
 
-def process_outputs(raw_data, options, mode_name):
+def process_outputs(raw_data, options, mode_name, sample_rate):
     """Processes the raw serial bytes into the formats requested by the user."""
     print("\nProcessing outputs...")
+    print(f"Measured sample rate: {sample_rate} Hz")
     
     if 'WAV' in options:
-        compile_and_run_c_converter(raw_data)
+        compile_and_run_c_converter(raw_data, mode_name, sample_rate)
         
     if 'CSV' in options or 'PNG' in options:
         data_array = np.frombuffer(raw_data, dtype=np.uint8)
         
         if 'CSV' in options:
-            generate_csv(data_array)
+            generate_csv(data_array, mode_name, sample_rate)
             
         if 'PNG' in options:
-            generate_png(data_array, mode_name)
+            generate_png(data_array, mode_name, sample_rate)
     
     print("Outputs generated successfully!")
 
@@ -76,6 +94,28 @@ def get_output_preferences():
     if want_csv: options.append('CSV')
     return options
 
+def record_for_duration(ser, duration):
+    """Record by elapsed time, then use the actual byte rate for playback."""
+    chunks = []
+    ser.reset_input_buffer()
+    ser.write(b'M')
+
+    start_time = time.monotonic()
+    deadline = start_time + duration
+
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        read_size = max(1, min(4096, int(NOMINAL_FS * min(0.05, remaining))))
+        chunk = ser.read(read_size)
+        if chunk:
+            chunks.append(chunk)
+
+    elapsed = time.monotonic() - start_time
+    ser.write(b'S')
+
+    raw_data = b''.join(chunks)
+    return raw_data, measured_sample_rate(len(raw_data), elapsed), elapsed
+
 def manual_recording_mode():
     print("\n--- Manual Recording Mode ---")
     try:
@@ -87,27 +127,29 @@ def manual_recording_mode():
         
     options = get_output_preferences()
     
-    bytes_to_read = int(FS * duration)
-    
     try:
-        with serial.Serial(PORT, BAUD, timeout=10) as ser:
+        with serial.Serial(PORT, BAUD, timeout=0.02) as ser:
             input("\nPress Enter to START recording...")
-            ser.write(b'M')
             print(f"Recording for {duration} seconds...")
-            raw_data = ser.read(bytes_to_read)
-            ser.write(b'S')
-            print("Recording complete!")
+            raw_data, sample_rate, elapsed = record_for_duration(ser, duration)
+            print(f"Recording complete! Captured {len(raw_data)} bytes in {elapsed:.2f}s.")
             
         if options:
-            process_outputs(raw_data, options, "Manual Mode")
+            process_outputs(raw_data, options, "Manual Mode", sample_rate)
     except Exception as e:
         print(f"Serial Error: {e}")
 
 def distance_trigger_mode():
     print("\n--- Distance Trigger Mode ---")
     options = get_output_preferences()
+    try:
+        threshold_raw = input("Trigger distance in cm [default 10]: ").strip()
+        threshold_cm = int(threshold_raw) if threshold_raw else 10
+        threshold_cm = max(1, min(255, threshold_cm))
+    except ValueError:
+        threshold_cm = 10
     
-    print("\n[Distance Mode] The system will auto-record when an object is within 10cm.")
+    print(f"\n[Distance Mode] The system will auto-record when an object is within {threshold_cm}cm.")
     print("Press Ctrl+C to exit mode.\n")
     
     ser = None
@@ -119,6 +161,8 @@ def distance_trigger_mode():
         ser.write(b'S')
         time.sleep(0.3)
         ser.reset_input_buffer()
+        ser.write(bytes([ord('C'), threshold_cm]))
+        time.sleep(0.1)
         ser.write(b'D')  # Put Processing STM into Distance Trigger mode
         
         trigger_num = 0
@@ -132,6 +176,8 @@ def distance_trigger_mode():
             if trigger_byte:
                 trigger_num += 1
                 print(f"\n[!] Trigger #{trigger_num} detected! Recording started...")
+                recording_start = time.monotonic()
+                last_data_time = recording_start
                 raw_data = trigger_byte
                 
                 # Keep reading until timeout (= object left, data stopped)
@@ -139,13 +185,16 @@ def distance_trigger_mode():
                     chunk = ser.read(8000)
                     if chunk:
                         raw_data += chunk
+                        last_data_time = time.monotonic()
                     else:
                         print("[!] Object left. Recording stopped.")
                         break
                 
-                print(f"Captured {len(raw_data)} bytes of audio.")
+                elapsed = max(0.001, last_data_time - recording_start)
+                sample_rate = measured_sample_rate(len(raw_data), elapsed)
+                print(f"Captured {len(raw_data)} bytes of audio in {elapsed:.2f}s.")
                 if options and len(raw_data) > 0:
-                    process_outputs(raw_data, options, f"Distance Trigger #{trigger_num}")
+                    process_outputs(raw_data, options, f"Distance Trigger #{trigger_num}", sample_rate)
                 
                 print()
                     

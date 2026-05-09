@@ -21,6 +21,15 @@ typedef struct {
 #pragma pack(pop)
 
 int main(int argc, char* argv[]) {
+    uint32_t sample_rate = 22038;
+
+    if (argc >= 2) {
+        uint32_t requested_rate = (uint32_t)strtoul(argv[1], NULL, 10);
+        if (requested_rate > 0) {
+            sample_rate = requested_rate;
+        }
+    }
+
     FILE *in = fopen("raw_ADC_values.data", "rb");
     if (!in) {
         printf("Error: Cannot open raw_ADC_values.data\n");
@@ -47,7 +56,7 @@ int main(int argc, char* argv[]) {
     header.length_of_fmt = 16;
     header.format_type = 1; // PCM
     header.channels = 1; // Mono
-    header.sample_rate = 8000;
+    header.sample_rate = sample_rate;
     header.bits_per_sample = 8;
     header.byterate = header.sample_rate * header.channels * (header.bits_per_sample / 8);
     header.block_align = header.channels * (header.bits_per_sample / 8);
@@ -66,6 +75,6 @@ int main(int argc, char* argv[]) {
     fclose(in);
     fclose(out);
 
-    printf("Successfully converted %u bytes to output.wav (8kHz, 8-bit, Mono)\n", data_size);
+    printf("Successfully converted %u bytes to output.wav (%uHz, 8-bit, Mono)\n", data_size, sample_rate);
     return 0;
 }
