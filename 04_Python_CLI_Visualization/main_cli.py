@@ -562,7 +562,7 @@ def distance_trigger_mode():
         print(f"Serial/processing error: {exc}")
 
 
-if __name__ == "__main__":
+def main():
     print("Welcome to the Dual-Board Audio Processing System CLI!")
 
     while True:
@@ -587,3 +587,7 @@ if __name__ == "__main__":
             break
         else:
             print("Invalid input, please try again.")
+
+
+if __name__ == "__main__":
+    main()
