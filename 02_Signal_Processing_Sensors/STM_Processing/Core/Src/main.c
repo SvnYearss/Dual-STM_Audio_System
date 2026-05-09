@@ -22,6 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdlib.h>
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -32,6 +33,11 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 uint8_t rx_byte;
+#define AUDIO_SAMPLE_MASK      0x0FFFU
+#define OUTLIER_THRESHOLD_12B  600
+#define MOVING_AVERAGE_WINDOW  3U
+#define HCSR04_TRIGGER_CM      10.0f
+#define HCSR04_DEBOUNCE_COUNT  3U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -43,6 +49,10 @@ uint8_t rx_byte;
 SPI_HandleTypeDef hspi1;
 DMA_HandleTypeDef hdma_spi1_rx;
 
+TIM_HandleTypeDef htim2;
+TIM_HandleTypeDef htim7;
+TIM_HandleTypeDef htim15;
+
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 DMA_HandleTypeDef hdma_usart2_tx;
@@ -51,16 +61,33 @@ DMA_HandleTypeDef hdma_usart2_tx;
 uint8_t pc_rx_byte = 0;
 uint8_t rx_buffer[2];
 uint8_t sample_count = 0;
-uint8_t pc_tx_byte = 0;
 
-uint16_t sample_history[3] = {0, 0, 0};
+uint8_t system_state = '0';
+uint8_t trigger_count = 0;
+uint8_t release_count = 0;
+uint32_t IC_Val1 = 0;
+uint32_t IC_Val2 = 0;
+uint32_t Difference = 0;
+uint8_t Is_First_Captured = 0;
+float distance = 0.0;
+uint8_t distance_recording_active = 0;
+
+uint16_t sample_history[MOVING_AVERAGE_WINDOW] = {0};
 uint8_t buffer_index = 0;
 uint16_t last_valid_sample = 0;
 uint8_t downsample_counter = 0;
 int THRESHOLD = 50;
 uint16_t spi_rx_buffer[200];
-uint8_t uart_tx_buffer_half1[200];
-uint8_t uart_tx_buffer_half2[200];
+
+/* ---- UART TX FIFO (4-slot circular queue) ---- */
+#define TX_BUF_COUNT  4U
+#define TX_BUF_SIZE   200U
+
+static uint8_t tx_pool[TX_BUF_COUNT][TX_BUF_SIZE];
+static volatile uint8_t tx_wr   = 0; /* next slot to fill  */
+static volatile uint8_t tx_rd   = 0; /* next slot to send  */
+static volatile uint8_t tx_cnt  = 0; /* slots waiting      */
+static volatile uint8_t tx_busy = 0; /* DMA in progress    */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -70,12 +97,107 @@ static void MX_DMA_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_SPI1_Init(void);
+static void MX_TIM2_Init(void);
+static void MX_TIM7_Init(void);
+static void MX_TIM15_Init(void);
 /* USER CODE BEGIN PFP */
-
+void delay_uS(uint16_t delay);
+void HCSR04_Read(void);
+static void SendPcStatus(const char *message);
+static void ForwardSamplingCommand(uint8_t cmd);
+static void UpdateDistanceTrigger(float distance_cm);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static uint16_t ProcessAudioSample(uint16_t sample)
+{
+    sample &= AUDIO_SAMPLE_MASK;
+
+    if (sample_count == 0U)
+    {
+        for (uint8_t i = 0; i < MOVING_AVERAGE_WINDOW; i++)
+        {
+            sample_history[i] = sample;
+        }
+        last_valid_sample = sample;
+        sample_count = 1U;
+        return sample;
+    }
+
+    uint16_t accepted = sample;
+    uint16_t mean = last_valid_sample;
+
+    if (sample_count >= MOVING_AVERAGE_WINDOW)
+    {
+        uint32_t sum = 0U;
+        for (uint8_t i = 0; i < MOVING_AVERAGE_WINDOW; i++)
+        {
+            sum += sample_history[i];
+        }
+        mean = (uint16_t)(sum / MOVING_AVERAGE_WINDOW);
+        int diff = (int)sample - (int)mean;
+        if (abs(diff) > OUTLIER_THRESHOLD_12B)
+        {
+            accepted = mean;
+        }
+    }
+    else
+    {
+        sample_count++;
+    }
+
+    sample_history[buffer_index] = accepted;
+    buffer_index++;
+    if (buffer_index >= MOVING_AVERAGE_WINDOW)
+    {
+        buffer_index = 0U;
+    }
+
+    uint32_t filtered_sum = 0U;
+    for (uint8_t i = 0; i < MOVING_AVERAGE_WINDOW; i++)
+    {
+        filtered_sum += sample_history[i];
+    }
+    last_valid_sample = (uint16_t)(filtered_sum / MOVING_AVERAGE_WINDOW) & AUDIO_SAMPLE_MASK;
+    return last_valid_sample;
+}
+
+static void ForwardSamplingCommand(uint8_t cmd)
+{
+    HAL_UART_Transmit(&huart1, &cmd, 1, HAL_MAX_DELAY);
+}
+
+static void SendPcStatus(const char *message)
+{
+    HAL_UART_Transmit(&huart2, (uint8_t *)message, strlen(message), 20);
+}
+
+static void UpdateDistanceTrigger(float distance_cm)
+{
+    if (distance_cm > 0.0f && distance_cm <= HCSR04_TRIGGER_CM)
+    {
+        trigger_count++;
+        release_count = 0;
+        if ((trigger_count >= HCSR04_DEBOUNCE_COUNT) && (distance_recording_active == 0U))
+        {
+            uint8_t cmd = 'M';
+            distance_recording_active = 1U;
+            ForwardSamplingCommand(cmd);
+        }
+    }
+    else if (distance_cm > HCSR04_TRIGGER_CM)
+    {
+        release_count++;
+        trigger_count = 0;
+        if ((release_count >= HCSR04_DEBOUNCE_COUNT) && (distance_recording_active != 0U))
+        {
+            uint8_t cmd = 'S';
+            distance_recording_active = 0U;
+            ForwardSamplingCommand(cmd);
+        }
+    }
+}
 
 /* USER CODE END 0 */
 
@@ -112,7 +234,12 @@ int main(void)
   MX_USART2_UART_Init();
   MX_USART1_UART_Init();
   MX_SPI1_Init();
+  MX_TIM2_Init();
+  MX_TIM7_Init();
+  MX_TIM15_Init();
   /* USER CODE BEGIN 2 */
+  HAL_TIM_Base_Start(&htim7);
+  HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1);
   HAL_UART_Receive_IT(&huart1, rx_buffer, 2);
   HAL_UART_Receive_IT(&huart2, &pc_rx_byte, 1);
   HAL_SPI_Receive_DMA(&hspi1, (uint8_t*)spi_rx_buffer, 200);
@@ -229,6 +356,138 @@ static void MX_SPI1_Init(void)
 }
 
 /**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_IC_InitTypeDef sConfigIC = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 32-1;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 4294967295;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_IC_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_RISING;
+  sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
+  sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
+  sConfigIC.ICFilter = 0;
+  if (HAL_TIM_IC_ConfigChannel(&htim2, &sConfigIC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
+
+}
+
+/**
+  * @brief TIM7 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM7_Init(void)
+{
+
+  /* USER CODE BEGIN TIM7_Init 0 */
+
+  /* USER CODE END TIM7_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM7_Init 1 */
+
+  /* USER CODE END TIM7_Init 1 */
+  htim7.Instance = TIM7;
+  htim7.Init.Prescaler = 32-1;
+  htim7.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim7.Init.Period = 65535;
+  htim7.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim7) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim7, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM7_Init 2 */
+
+  /* USER CODE END TIM7_Init 2 */
+
+}
+
+/**
+  * @brief TIM15 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM15_Init(void)
+{
+
+  /* USER CODE BEGIN TIM15_Init 0 */
+
+  /* USER CODE END TIM15_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM15_Init 1 */
+
+  /* USER CODE END TIM15_Init 1 */
+  htim15.Instance = TIM15;
+  htim15.Init.Prescaler = 32000-1;
+  htim15.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim15.Init.Period = 60-1;
+  htim15.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim15.Init.RepetitionCounter = 0;
+  htim15.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim15) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim15, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim15, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM15_Init 2 */
+
+  /* USER CODE END TIM15_Init 2 */
+
+}
+
+/**
   * @brief USART1 Initialization Function
   * @param None
   * @retval None
@@ -335,14 +594,14 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : LD3_Pin */
-  GPIO_InitStruct.Pin = LD3_Pin;
+  /*Configure GPIO pin : PA4 */
+  GPIO_InitStruct.Pin = GPIO_PIN_4;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(LD3_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -350,44 +609,147 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_TIM_PeriodElapsedCallback (TIM_HandleTypeDef* htim)
+{
+  if (htim == &htim15)
+  {
+      if (system_state == 'D')
+      {
+          HCSR04_Read();
+      }
+  }
+}
+
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
 	if(huart->Instance == USART2)
 	{
-		HAL_UART_Transmit(&huart1, &pc_rx_byte, 1, HAL_MAX_DELAY);
-
-		HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin); // To tell it received and transmitted a message
+		if(pc_rx_byte == 'M' || pc_rx_byte == 'S')
+		{
+			system_state = pc_rx_byte;
+			HAL_TIM_Base_Stop_IT(&htim15);
+			trigger_count = 0;
+			release_count = 0;
+			distance_recording_active = (pc_rx_byte == 'M') ? 1U : 0U;
+			SendPcStatus((pc_rx_byte == 'M') ? "ACK:M\n" : "ACK:S\n");
+			ForwardSamplingCommand(pc_rx_byte);
+		}
+		else if (pc_rx_byte == 'D')
+		{
+			system_state = 'D';
+			trigger_count = 0;
+			release_count = 0;
+			distance_recording_active = 0U;
+			uint8_t stop_cmd = 'S';
+			SendPcStatus("ACK:D\n");
+			ForwardSamplingCommand(stop_cmd);
+			HAL_TIM_Base_Start_IT(&htim15);
+		}
 
 		HAL_UART_Receive_IT(&huart2, &pc_rx_byte, 1);
 	}
+}
+
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
+{
+	if (htim->Instance == TIM2 && htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1)
+	{
+		if (Is_First_Captured == 0)
+		{
+			IC_Val1 = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+			Is_First_Captured = 1;
+			__HAL_TIM_SET_CAPTUREPOLARITY(htim, TIM_CHANNEL_1, TIM_INPUTCHANNELPOLARITY_FALLING);
+		}
+		else if (Is_First_Captured == 1)
+		{
+			IC_Val2 = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+
+			if (IC_Val2 >= IC_Val1) {
+				Difference = IC_Val2 - IC_Val1;
+			} else {
+				Difference = (0xFFFFFFFFU - IC_Val1) + IC_Val2 + 1U;
+			}
+
+			distance = Difference * 0.0343 / 2.0;
+			Is_First_Captured = 0;
+			__HAL_TIM_SET_CAPTUREPOLARITY(htim, TIM_CHANNEL_1, TIM_INPUTCHANNELPOLARITY_RISING);
+
+			if (system_state == 'D')
+			{
+				UpdateDistanceTrigger(distance);
+			}
+		}
+	}
+}
+
+void delay_uS(uint16_t delay)
+{
+	__HAL_TIM_SET_COUNTER(&htim7, 0);
+	while(__HAL_TIM_GET_COUNTER(&htim7) < delay) {}
+}
+
+void HCSR04_Read(void)
+{
+    Is_First_Captured = 0;
+    __HAL_TIM_SET_CAPTUREPOLARITY(&htim2, TIM_CHANNEL_1, TIM_INPUTCHANNELPOLARITY_RISING);
+    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
+    delay_uS(10);
+    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
+}
+
+static uint8_t tx_queue_full(void)
+{
+    uint8_t usable_slots = TX_BUF_COUNT - ((tx_busy != 0U) ? 1U : 0U);
+    return (tx_cnt >= usable_slots) ? 1U : 0U;
+}
+
+/* Enqueue a filled TX buffer and kick DMA if idle */
+static void tx_enqueue(void)
+{
+    uint8_t next_wr = (tx_wr + 1U) % TX_BUF_COUNT;
+    if (tx_queue_full()) {
+        return;
+    }
+    tx_wr = next_wr;
+    tx_cnt++;
+
+    if (!tx_busy) {
+        tx_busy = 1U;
+        HAL_UART_Transmit_DMA(&huart2, tx_pool[tx_rd], TX_BUF_SIZE);
+        tx_rd = (tx_rd + 1U) % TX_BUF_COUNT;
+        tx_cnt--;
+    }
+}
+
+/* UART TX complete – send next queued buffer if any */
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART2) {
+        if (tx_cnt > 0U) {
+            HAL_UART_Transmit_DMA(&huart2, tx_pool[tx_rd], TX_BUF_SIZE);
+            tx_rd = (tx_rd + 1U) % TX_BUF_COUNT;
+            tx_cnt--;
+        } else {
+            tx_busy = 0U;
+        }
+    }
 }
 
 void HAL_SPI_RxHalfCpltCallback(SPI_HandleTypeDef *hspi)
 {
     if(hspi->Instance == SPI1)
     {
+        if (tx_queue_full()) {
+            return;
+        }
+        uint8_t *buf = tx_pool[tx_wr];
         for(int i = 0; i < 100; i++)
         {
-            uint16_t current_val = spi_rx_buffer[i];
-
-            int diff = (int)current_val - (int)last_valid_sample;
-            if(abs(diff) > THRESHOLD)
-            {
-                current_val = last_valid_sample;
-            }
-            last_valid_sample = current_val;
-
-            sample_history[buffer_index] = current_val;
-            buffer_index++;
-            if(buffer_index >= 3) { buffer_index = 0; }
-
-            uint16_t avg = (sample_history[0] + sample_history[1] + sample_history[2]) / 3;
-
-            uart_tx_buffer_half1[i * 2]     = (uint8_t)(avg >> 8);
-            uart_tx_buffer_half1[i * 2 + 1] = (uint8_t)(avg & 0xFF);
+            uint16_t avg = ProcessAudioSample(spi_rx_buffer[i]);
+            buf[i * 2]     = (uint8_t)(avg & 0xFF);
+            buf[i * 2 + 1] = (uint8_t)((avg >> 8) & 0x0F);
         }
-
-        HAL_UART_Transmit_DMA(&huart2, uart_tx_buffer_half1, 200);
+        tx_enqueue();
     }
 }
 
@@ -395,28 +757,17 @@ void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
 {
     if(hspi->Instance == SPI1)
     {
+        if (tx_queue_full()) {
+            return;
+        }
+        uint8_t *buf = tx_pool[tx_wr];
         for(int i = 0; i < 100; i++)
         {
-            uint16_t current_val = spi_rx_buffer[i + 100];
-
-            int diff = (int)current_val - (int)last_valid_sample;
-            if(abs(diff) > THRESHOLD)
-            {
-                current_val = last_valid_sample;
-            }
-            last_valid_sample = current_val;
-
-            sample_history[buffer_index] = current_val;
-            buffer_index++;
-            if(buffer_index >= 3) { buffer_index = 0; }
-
-            uint16_t avg = (sample_history[0] + sample_history[1] + sample_history[2]) / 3;
-
-            uart_tx_buffer_half2[i * 2]     = (uint8_t)(avg >> 8);
-            uart_tx_buffer_half2[i * 2 + 1] = (uint8_t)(avg & 0xFF);
+            uint16_t avg = ProcessAudioSample(spi_rx_buffer[i + 100]);
+            buf[i * 2]     = (uint8_t)(avg & 0xFF);
+            buf[i * 2 + 1] = (uint8_t)((avg >> 8) & 0x0F);
         }
-
-        HAL_UART_Transmit_DMA(&huart2, uart_tx_buffer_half2, 200);
+        tx_enqueue();
     }
 }
 /* USER CODE END 4 */
