@@ -23,6 +23,6 @@ env/
 *.wav
 *.csv
 *.png
-*.extSettings
+*.exe
 *.data
-*.yxy
+*.txt
