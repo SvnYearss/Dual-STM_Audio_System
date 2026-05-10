@@ -42,7 +42,10 @@ int main(int argc, char* argv[]) {
     header.riff[0] = 'R'; header.riff[1] = 'I'; header.riff[2] = 'F'; header.riff[3] = 'F';
     header.overall_size = data_size + sizeof(WavHeader) - 8;
     header.wave[0] = 'W'; header.wave[1] = 'A'; header.wave[2] = 'V'; header.wave[3] = 'E';
-    header.fmt_chunk_marker[0] = 'f'; header.fmt_chunk_marker[1] = 'm'; header.fmt_chunk_marker[2] = 't'; header.fmt_chunk_marker[3] = ' ';
+    header.fmt_chunk_marker[0] = 'f'; 
+    header.fmt_chunk_marker[1] = 'm'; 
+    header.fmt_chunk_marker[2] = 't'; 
+    header.fmt_chunk_marker[3] = ' ';
     header.length_of_fmt = 16;
     header.format_type = 1; // PCM
     header.channels = 1; // Mono
@@ -50,7 +53,10 @@ int main(int argc, char* argv[]) {
     header.bits_per_sample = 8;
     header.byterate = header.sample_rate * header.channels * (header.bits_per_sample / 8);
     header.block_align = header.channels * (header.bits_per_sample / 8);
-    header.data_chunk_header[0] = 'd'; header.data_chunk_header[1] = 'a'; header.data_chunk_header[2] = 't'; header.data_chunk_header[3] = 'a';
+    header.data_chunk_header[0] = 'd'; 
+    header.data_chunk_header[1] = 'a'; 
+    header.data_chunk_header[2] = 't'; 
+    header.data_chunk_header[3] = 'a';
     header.data_size = data_size;
 
     fwrite(&header, sizeof(WavHeader), 1, out);
