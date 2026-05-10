@@ -1,8 +1,8 @@
 """
-UI.py  —  Rose Noir Edition
+UI.py
 Dual-STM Audio Acquisition System
 Requires: pip install rich pyserial
-Run:      python UI.py
+Run:      python3 UI.py
 """
 
 import time
@@ -62,6 +62,39 @@ THEMES = {
         "FAIL":  "red",          
         "WHITE": "white",        
         "TITLE": "CYBER TERMINAL"
+    },
+    "PURPLE_GALAXY": {
+        "HOT":   "medium_purple1", # Deep glowing purple
+        "MID":   "medium_purple2", 
+        "TEAL":  "cyan1",          # Starlight cyan for success
+        "AMBER": "magenta2",       
+        "DIM":   "dark_magenta",   
+        "GHOST": "grey37",         
+        "FAIL":  "deep_pink2",     
+        "WHITE": "white",          
+        "TITLE": "GALAXY PROTOCOL"
+    },
+    "AMBER_RADAR": {
+        "HOT":   "dark_orange",    # Classic CRT orange
+        "MID":   "orange3",        
+        "TEAL":  "gold1",          # Bright yellow-gold for success
+        "AMBER": "yellow4",        
+        "DIM":   "orange4",        
+        "GHOST": "grey23",         
+        "FAIL":  "red1",           
+        "WHITE": "light_goldenrod1", 
+        "TITLE": "AMBER RADAR SYS"
+    },
+    "SUNSET": {
+        "HOT":   "dark_orange",    # Vibrant sunset orange
+        "MID":   "indian_red",     # Warm red tones
+        "TEAL":  "gold1",          # Sun yellow for success
+        "AMBER": "dark_goldenrod", 
+        "DIM":   "rosy_brown",     
+        "GHOST": "grey50",         
+        "FAIL":  "red3",           
+        "WHITE": "navajo_white1",  
+        "TITLE": "HORIZON EDITION"
     }
 }
 
@@ -148,7 +181,9 @@ _WF = ["▁▂▃▄▅▆▇█▇▆▅▄▃▂▁","▂▃▄▅▆▇█▇
 
 def _bar_color(pct: float) -> str:
     if pct <= 0.20: return "#cc1144"
-    if pct <  1.00: return "#cc44aa"
+    if (pct > 0.20 and pct <= 0.70): return "#cca311"
+    if (pct > 0.70 and pct < 0.99): return "#11cc21"
+    if pct ==  1.00: return HOT
     return TEAL
 
 def render_telemetry(state, frame: int) -> Panel:
@@ -278,9 +313,18 @@ def render_processing_output(result: dict) -> Panel:
     if files:
         right.add_row("", Text.from_markup(f"[{DIM}]──── Generated Files ────[/]"))
         for f in files:
+            # 1. Get the absolute path to where the file was saved
+            # (Assuming they save to audio.REPO_ROOT or the current directory)
+            abs_path = os.path.abspath(os.path.join(audio.REPO_ROOT, f))
+            
+            # 2. Format it as a proper local file URI
+            file_uri = f"file://{abs_path}"
+            
+            # 3. Wrap the filename in the rich [link] tag
             right.add_row(
                 Text.from_markup(f"[{TEAL}]→[/]"),
-                Text.from_markup(f"[{HOT}]{f}[/]"))
+                Text.from_markup(f"[link={file_uri}][bold {HOT} underline]{f}[/][/link]")
+            )
 
     for e in errors:
         right.add_row(
@@ -378,7 +422,6 @@ def render_menu_table() -> Table:
     t.add_row("q", "Quit Program")
     return t
 
-# ──────────────────── OUTPUT PREFERENCES ────────────────────────
 # ──────────────────── OUTPUT PREFERENCES ────────────────────────
 def get_output_preferences() -> list:
     console.print() # Breathing room
@@ -595,7 +638,6 @@ def manual_recording_mode():
         console.print() # Add a blank line for breathing room
         console.rule(f"[{FAIL}]ERROR[/]", style=FAIL)
         console.print(f"\n[{FAIL}]Serial/processing error:[/] {exc}\n")
-        console.input(f"[{GHOST}]Press Enter to return to menu...[/]")
         console.print()
         return_to_menu_countdown(seconds=2)
         console.print()
@@ -670,7 +712,6 @@ def distance_trigger_mode():
         console.print()
         console.rule(f"[{FAIL}]ERROR[/]", style=FAIL)
         console.print(f"\n[{FAIL}]Serial/processing error:[/] {exc}\n")
-        console.input(f"[{GHOST}]Press Enter to return to menu...[/]")
         console.print()
         return_to_menu_countdown(seconds=2)
         console.print()
