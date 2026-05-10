@@ -21,6 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 /* USER CODE END Includes */
@@ -36,7 +37,9 @@ uint8_t rx_byte;
 #define AUDIO_SAMPLE_MASK      0x0FFFU
 #define OUTLIER_THRESHOLD_12B  600
 #define MOVING_AVERAGE_WINDOW  3U
-#define HCSR04_TRIGGER_CM      10.0f
+#define HCSR04_DEFAULT_TRIGGER_CM  10U
+#define HCSR04_MIN_TRIGGER_CM      2U
+#define HCSR04_MAX_TRIGGER_CM      200U
 #define HCSR04_DEBOUNCE_COUNT  3U
 /* USER CODE END PD */
 
@@ -71,6 +74,8 @@ uint32_t Difference = 0;
 uint8_t Is_First_Captured = 0;
 float distance = 0.0;
 uint8_t distance_recording_active = 0;
+uint8_t hcsr04_trigger_cm = HCSR04_DEFAULT_TRIGGER_CM;
+uint8_t expecting_distance_threshold = 0;
 
 uint16_t sample_history[MOVING_AVERAGE_WINDOW] = {0};
 uint8_t buffer_index = 0;
@@ -175,7 +180,7 @@ static void SendPcStatus(const char *message)
 
 static void UpdateDistanceTrigger(float distance_cm)
 {
-    if (distance_cm > 0.0f && distance_cm <= HCSR04_TRIGGER_CM)
+    if (distance_cm > 0.0f && distance_cm <= (float)hcsr04_trigger_cm)
     {
         trigger_count++;
         release_count = 0;
@@ -186,7 +191,7 @@ static void UpdateDistanceTrigger(float distance_cm)
             ForwardSamplingCommand(cmd);
         }
     }
-    else if (distance_cm > HCSR04_TRIGGER_CM)
+    else if (distance_cm > (float)hcsr04_trigger_cm)
     {
         release_count++;
         trigger_count = 0;
@@ -624,7 +629,30 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
 	if(huart->Instance == USART2)
 	{
-		if(pc_rx_byte == 'M' || pc_rx_byte == 'S')
+		if (expecting_distance_threshold != 0U)
+		{
+			if (pc_rx_byte < HCSR04_MIN_TRIGGER_CM)
+			{
+				hcsr04_trigger_cm = HCSR04_MIN_TRIGGER_CM;
+			}
+			else if (pc_rx_byte > HCSR04_MAX_TRIGGER_CM)
+			{
+				hcsr04_trigger_cm = HCSR04_MAX_TRIGGER_CM;
+			}
+			else
+			{
+				hcsr04_trigger_cm = pc_rx_byte;
+			}
+
+			trigger_count = 0;
+			release_count = 0;
+			expecting_distance_threshold = 0U;
+
+			char status_msg[16];
+			snprintf(status_msg, sizeof(status_msg), "ACK:R:%u\n", hcsr04_trigger_cm);
+			SendPcStatus(status_msg);
+		}
+		else if(pc_rx_byte == 'M' || pc_rx_byte == 'S')
 		{
 			system_state = pc_rx_byte;
 			HAL_TIM_Base_Stop_IT(&htim15);
@@ -644,6 +672,10 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 			SendPcStatus("ACK:D\n");
 			ForwardSamplingCommand(stop_cmd);
 			HAL_TIM_Base_Start_IT(&htim15);
+		}
+		else if (pc_rx_byte == 'R')
+		{
+			expecting_distance_threshold = 1U;
 		}
 
 		HAL_UART_Receive_IT(&huart2, &pc_rx_byte, 1);

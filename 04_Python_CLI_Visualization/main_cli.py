@@ -15,6 +15,9 @@ OUTPUT_FS = NOMINAL_FS
 SAMPLE_WIDTH_BYTES = 2
 BIT_DEPTH = 12
 TEAM_ID = "T12"
+DISTANCE_TRIGGER_DEFAULT_CM = 10
+DISTANCE_TRIGGER_MIN_CM = 2
+DISTANCE_TRIGGER_MAX_CM = 200
 OUTLIER_THRESHOLD = 600
 FILTER_ENABLED = True
 HIGHPASS_CUTOFF_HZ = 70.0
@@ -449,6 +452,57 @@ def send_command_and_wait_for_ack(ser, command, timeout=0.35):
     return False, bytes(seen)
 
 
+def get_distance_threshold():
+    while True:
+        prompt = (
+            f"Enter trigger distance in cm "
+            f"({DISTANCE_TRIGGER_MIN_CM}-{DISTANCE_TRIGGER_MAX_CM}, "
+            f"default {DISTANCE_TRIGGER_DEFAULT_CM}): "
+        )
+        value = input(prompt).strip()
+        if value == "":
+            return DISTANCE_TRIGGER_DEFAULT_CM
+
+        try:
+            threshold_cm = int(value)
+        except ValueError:
+            print("Invalid distance. Please enter a whole number in cm.")
+            continue
+
+        if DISTANCE_TRIGGER_MIN_CM <= threshold_cm <= DISTANCE_TRIGGER_MAX_CM:
+            return threshold_cm
+
+        print(
+            "Distance out of range. "
+            f"Use {DISTANCE_TRIGGER_MIN_CM}-{DISTANCE_TRIGGER_MAX_CM} cm."
+        )
+
+
+def configure_distance_threshold(ser, threshold_cm, timeout=0.6):
+    threshold_cm = int(threshold_cm)
+    expected = f"ACK:R:{threshold_cm}\n".encode()
+    deadline = time.monotonic() + timeout
+    seen = bytearray()
+
+    ser.write(b"R")
+    ser.flush()
+    time.sleep(0.02)
+    ser.write(bytes([threshold_cm]))
+    ser.flush()
+
+    while time.monotonic() < deadline:
+        chunk = ser.read(1)
+        if not chunk:
+            continue
+        seen.extend(chunk)
+        if expected in seen:
+            return True, bytes(seen)
+        if len(seen) > 96:
+            del seen[:-96]
+
+    return False, bytes(seen)
+
+
 def record_for_duration(ser, duration):
     chunks = []
     ser.reset_input_buffer()
@@ -508,12 +562,21 @@ def manual_recording_mode():
 def distance_trigger_mode():
     print("\n--- Distance Trigger Mode ---")
     options = get_output_preferences()
-    print("\n[Distance Mode] Recording starts while the ultrasonic sensor is within 10cm.")
+    threshold_cm = get_distance_threshold()
+    print(f"\n[Distance Mode] Recording starts while the ultrasonic sensor is within {threshold_cm}cm.")
     print("Press Ctrl+C to exit mode.\n")
 
     try:
         with serial.Serial(PORT, BAUD, timeout=0.05) as ser:
             ser.reset_input_buffer()
+            configured, config_seen = configure_distance_threshold(ser, threshold_cm)
+            if configured:
+                print(f"Distance trigger threshold set to {threshold_cm}cm.")
+            else:
+                print("Warning: distance threshold was not acknowledged. Continuing with STM default/current setting.")
+                if config_seen:
+                    print(f"Received before distance mode: {config_seen!r}")
+
             got_ack, seen = send_command_and_wait_for_ack(ser, b"D")
             if got_ack:
                 print("Processing STM acknowledged distance mode.")

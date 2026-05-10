@@ -1,5 +1,6 @@
 Debug/
 Release/
+.DS_Store
 *.o
 *.elf
 *.bin
@@ -23,6 +24,9 @@ env/
 *.wav
 *.csv
 *.png
+!Docs/
+!Docs/images/
+!Docs/images/*.png
 *.data
 *.exe
 *.txt

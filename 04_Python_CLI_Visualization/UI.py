@@ -609,12 +609,40 @@ def manual_recording_mode():
 def distance_trigger_mode():
     console.rule(f"[bold {HOT}]Distance Trigger Mode[/]")
     options = get_output_preferences()
-    console.print(f"\n[{MID}]Recording starts while the ultrasonic sensor is within 10 cm.[/]")
+    while True:
+        raw_threshold = console.input(
+            f"[{DIM}]Trigger distance cm "
+            f"({audio.DISTANCE_TRIGGER_MIN_CM}-{audio.DISTANCE_TRIGGER_MAX_CM}, "
+            f"default {audio.DISTANCE_TRIGGER_DEFAULT_CM}):[/] "
+        ).strip()
+        if raw_threshold == "":
+            threshold_cm = audio.DISTANCE_TRIGGER_DEFAULT_CM
+            break
+        try:
+            threshold_cm = int(raw_threshold)
+        except ValueError:
+            console.print(f"[{FAIL}]Enter a whole number in cm.[/]")
+            continue
+        if audio.DISTANCE_TRIGGER_MIN_CM <= threshold_cm <= audio.DISTANCE_TRIGGER_MAX_CM:
+            break
+        console.print(
+            f"[{FAIL}]Use {audio.DISTANCE_TRIGGER_MIN_CM}-{audio.DISTANCE_TRIGGER_MAX_CM} cm.[/]"
+        )
+
+    console.print(f"\n[{MID}]Recording starts while the ultrasonic sensor is within {threshold_cm} cm.[/]")
     console.print(f"[{GHOST}]Press Ctrl+C to exit distance mode.[/]\n")
 
     try:
         with audio.serial.Serial(audio.PORT, audio.BAUD, timeout=0.05) as ser:
             ser.reset_input_buffer()
+            configured, config_seen = audio.configure_distance_threshold(ser, threshold_cm)
+            if configured:
+                console.print(f"[{TEAL}]Distance trigger threshold set to {threshold_cm} cm.[/]")
+            else:
+                console.print(f"[{AMBER}]Warning: distance threshold was not acknowledged.[/]")
+                if config_seen:
+                    console.print(f"[{GHOST}]Received before distance mode: {config_seen!r}[/]")
+
             got_ack, seen = audio.send_command_and_wait_for_ack(ser, b"D")
             if got_ack:
                 console.print(f"[{TEAL}]Processing STM acknowledged distance mode.[/]")
@@ -637,7 +665,7 @@ def distance_trigger_mode():
                 last_t    = rec_start
 
                 with console.status(
-                        f"[{TEAL}]Recording until object leaves 10 cm…[/]"):
+                        f"[{TEAL}]Recording until object leaves {threshold_cm} cm…[/]"):
                     while True:
                         chunk = ser.read(8192)
                         if chunk:
