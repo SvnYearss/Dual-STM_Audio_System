@@ -29,6 +29,11 @@
 #define AUDIO_FILTER_LEN           5U
 #define OUTLIER_THRESHOLD_10BIT    160U
 #define OUTLIER_RECOVERY_COUNT     4U
+#define DISTANCE_TRIGGER_DEFAULT_CM 10U
+#define DISTANCE_TRIGGER_MIN_CM     2U
+#define DISTANCE_TRIGGER_MAX_CM     200U
+#define DISTANCE_CM_TO_UM           10000U
+#define DEBOUNCE_COUNT              3U
 
 /* USER CODE END PD */
 
@@ -59,13 +64,6 @@ volatile uint8_t distance_ready = 0;
 
 // System state: 'S'=stop, 'M'=manual, 'D'=distance wait, 'R'=recording, 'T'=test
 volatile uint8_t system_state = 'S';
-
-// Distance trigger config
-#define DISTANCE_TRIGGER_DEFAULT_CM 10U
-#define DISTANCE_TRIGGER_MIN_CM     2U
-#define DISTANCE_TRIGGER_MAX_CM     200U
-#define DISTANCE_CM_TO_UM           10000U
-#define DEBOUNCE_COUNT              3U
 
 uint8_t distance_threshold_cm = DISTANCE_TRIGGER_DEFAULT_CM;
 uint32_t distance_threshold_um = DISTANCE_TRIGGER_DEFAULT_CM * DISTANCE_CM_TO_UM;
@@ -361,11 +359,12 @@ int main(void)
 	  // === Distance reporting (Test Mode) ===
 	  if (system_state == 'T' && distance_ready)
 	  {
-		  distance_ready = 0;
 		  uint32_t d = distance_um;
 		  uint32_t cm_whole = d / 10000;
 		  uint32_t cm_frac  = (d % 10000) / 100;
 		  char tmp[12];
+
+		  distance_ready = 0;
 
 		  // Send distance directly to PC via USART2 (bypasses moving average)
 		  uart_send_str(&huart2, "DIST:");
@@ -808,6 +807,8 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 		// Command from PC
 		if (pc_pending_threshold_byte)
 		{
+			char tmp[12];
+
 			if (pc_rx_byte < DISTANCE_TRIGGER_MIN_CM)
 				distance_threshold_cm = DISTANCE_TRIGGER_MIN_CM;
 			else if (pc_rx_byte > DISTANCE_TRIGGER_MAX_CM)
@@ -820,7 +821,6 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 			release_count = 0;
 			pc_pending_threshold_byte = 0;
 
-			char tmp[12];
 			uart_send_str(&huart2, "ACK:C:");
 			uart_send_str(&huart2, u32_to_str(distance_threshold_cm, tmp, sizeof(tmp)));
 			uart_send_str(&huart2, "\r\n");
