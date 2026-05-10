@@ -11,6 +11,9 @@ PORT = 'COM5'
 BAUD = 921600
 NOMINAL_FS = 22038  # Processing STM output rate after 44.077 ksps -> 2:1 downsample
 TEAM_ID = 'T12'
+DISTANCE_TRIGGER_DEFAULT_CM = 10
+DISTANCE_TRIGGER_MIN_CM = 2
+DISTANCE_TRIGGER_MAX_CM = 200
 
 def output_filename(mode_name, extension, sample_rate):
     safe_mode = ''.join(c if c.isalnum() else '_' for c in mode_name).strip('_')
@@ -27,11 +30,11 @@ def compile_and_run_c_converter(raw_data, mode_name, sample_rate):
         f.write(raw_data)
         
     print("  Compiling C converter...")
-    subprocess.run(["gcc", "01_Sampling_Data_Acquisition/STM_Sampling/file_conversion.c", "-o", "converter"])
+    subprocess.run(["gcc", "03_PC_File_Conversion/file_conversion.c", "-o", "converter"], check=True)
     print("  Running C converter...")
     # On Windows, the executable might be .exe
     exe_name = "converter.exe" if sys.platform == "win32" else "./converter"
-    subprocess.run([exe_name, str(sample_rate)])
+    subprocess.run([exe_name, str(sample_rate)], check=True)
     wav_name = output_filename(mode_name, "wav", sample_rate)
     if os.path.exists("output.wav"):
         os.replace("output.wav", wav_name)
@@ -94,6 +97,36 @@ def get_output_preferences():
     if want_csv: options.append('CSV')
     return options
 
+def get_distance_threshold():
+    """Prompt for a validated distance threshold in centimetres."""
+    prompt = (
+        f"Trigger distance in cm "
+        f"[{DISTANCE_TRIGGER_MIN_CM}-{DISTANCE_TRIGGER_MAX_CM}, "
+        f"default {DISTANCE_TRIGGER_DEFAULT_CM}]: "
+    )
+    while True:
+        threshold_raw = input(prompt).strip()
+        if not threshold_raw:
+            return DISTANCE_TRIGGER_DEFAULT_CM
+        try:
+            threshold_cm = int(threshold_raw)
+        except ValueError:
+            print("Invalid distance. Please enter a whole number.")
+            continue
+        if DISTANCE_TRIGGER_MIN_CM <= threshold_cm <= DISTANCE_TRIGGER_MAX_CM:
+            return threshold_cm
+        print(f"Distance must be between {DISTANCE_TRIGGER_MIN_CM} and {DISTANCE_TRIGGER_MAX_CM} cm.")
+
+def configure_distance_threshold(ser, threshold_cm):
+    """Sends C + one-byte distance to the Processing STM32."""
+    ser.write(bytes([ord('C'), threshold_cm]))
+    ack = ser.readline().decode(errors='ignore').strip()
+    expected = f"ACK:C:{threshold_cm}"
+    if ack == expected:
+        print(f"Distance trigger threshold set to {threshold_cm}cm.")
+    else:
+        print(f"Warning: expected {expected}, received {ack or 'no ACK'}.")
+
 def record_for_duration(ser, duration):
     """Record by elapsed time, then use the actual byte rate for playback."""
     chunks = []
@@ -142,12 +175,7 @@ def manual_recording_mode():
 def distance_trigger_mode():
     print("\n--- Distance Trigger Mode ---")
     options = get_output_preferences()
-    try:
-        threshold_raw = input("Trigger distance in cm [default 10]: ").strip()
-        threshold_cm = int(threshold_raw) if threshold_raw else 10
-        threshold_cm = max(1, min(255, threshold_cm))
-    except ValueError:
-        threshold_cm = 10
+    threshold_cm = get_distance_threshold()
     
     print(f"\n[Distance Mode] The system will auto-record when an object is within {threshold_cm}cm.")
     print("Press Ctrl+C to exit mode.\n")
@@ -161,8 +189,8 @@ def distance_trigger_mode():
         ser.write(b'S')
         time.sleep(0.3)
         ser.reset_input_buffer()
-        ser.write(bytes([ord('C'), threshold_cm]))
-        time.sleep(0.1)
+        configure_distance_threshold(ser, threshold_cm)
+        ser.reset_input_buffer()
         ser.write(b'D')  # Put Processing STM into Distance Trigger mode
         
         trigger_num = 0

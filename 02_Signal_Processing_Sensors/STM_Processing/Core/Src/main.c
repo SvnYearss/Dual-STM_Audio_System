@@ -61,8 +61,14 @@ volatile uint8_t distance_ready = 0;
 volatile uint8_t system_state = 'S';
 
 // Distance trigger config
-uint32_t distance_threshold_um = 100000;  // Default 10cm = 100000um (configurable)
-#define DEBOUNCE_COUNT 3  // Require 3 consecutive readings to trigger/stop
+#define DISTANCE_TRIGGER_DEFAULT_CM 10U
+#define DISTANCE_TRIGGER_MIN_CM     2U
+#define DISTANCE_TRIGGER_MAX_CM     200U
+#define DISTANCE_CM_TO_UM           10000U
+#define DEBOUNCE_COUNT              3U
+
+uint8_t distance_threshold_cm = DISTANCE_TRIGGER_DEFAULT_CM;
+uint32_t distance_threshold_um = DISTANCE_TRIGGER_DEFAULT_CM * DISTANCE_CM_TO_UM;
 uint8_t trigger_count = 0;  // Consecutive in-range readings
 uint8_t release_count = 0;  // Consecutive out-of-range readings
 volatile uint8_t pc_pending_threshold_byte = 0;
@@ -802,11 +808,22 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 		// Command from PC
 		if (pc_pending_threshold_byte)
 		{
-			if (pc_rx_byte > 0U)
-			{
-				distance_threshold_um = ((uint32_t)pc_rx_byte) * 10000U;
-			}
+			if (pc_rx_byte < DISTANCE_TRIGGER_MIN_CM)
+				distance_threshold_cm = DISTANCE_TRIGGER_MIN_CM;
+			else if (pc_rx_byte > DISTANCE_TRIGGER_MAX_CM)
+				distance_threshold_cm = DISTANCE_TRIGGER_MAX_CM;
+			else
+				distance_threshold_cm = pc_rx_byte;
+
+			distance_threshold_um = ((uint32_t)distance_threshold_cm) * DISTANCE_CM_TO_UM;
+			trigger_count = 0;
+			release_count = 0;
 			pc_pending_threshold_byte = 0;
+
+			char tmp[12];
+			uart_send_str(&huart2, "ACK:C:");
+			uart_send_str(&huart2, u32_to_str(distance_threshold_cm, tmp, sizeof(tmp)));
+			uart_send_str(&huart2, "\r\n");
 		}
 		else if (pc_rx_byte == 'C')
 		{
