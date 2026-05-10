@@ -209,6 +209,316 @@ R + one-byte distance_cm
 ACK:R:<distance_cm>
 ```
 
+## Code Reading Guide
+
+This section explains how to read the Processing STM32 firmware as a study guide. The important idea is that this board is both a realtime audio processor and the system coordinator.
+
+### 1. Start with the key constants
+
+The main behaviour is controlled by a small set of definitions near the top of `Core/Src/main.c`:
+
+```c
+#define AUDIO_SAMPLE_MASK      0x0FFFU
+#define OUTLIER_THRESHOLD_12B  600
+#define MOVING_AVERAGE_WINDOW  3U
+#define HCSR04_DEFAULT_TRIGGER_CM  10U
+#define HCSR04_MIN_TRIGGER_CM      2U
+#define HCSR04_MAX_TRIGGER_CM      200U
+#define HCSR04_DEBOUNCE_COUNT  3U
+```
+
+How to understand these values:
+
+- `AUDIO_SAMPLE_MASK` preserves the lower 12 bits from each 16-bit SPI word.
+- `OUTLIER_THRESHOLD_12B` defines how far a sample may jump before it is treated as a spike.
+- `MOVING_AVERAGE_WINDOW` is set to 3 because the specification requires at least a 3-sample moving average.
+- The HC-SR04 constants define the default, minimum, maximum, and debounce count for Distance Trigger Mode.
+
+### 2. Understand the audio filter state
+
+The moving average filter uses a small circular history:
+
+```c
+uint16_t sample_history[MOVING_AVERAGE_WINDOW] = {0};
+uint8_t buffer_index = 0;
+uint16_t last_valid_sample = 0;
+uint32_t sample_count = 0;
+```
+
+This is intentionally small. At 44.1 ksps, every sample must be processed quickly, so the firmware avoids dynamic memory, long loops, and floating-point audio filtering.
+
+### 3. Read `ProcessAudioSample()` as the audio pipeline
+
+This function is the centre of the Processing STM32 audio logic:
+
+```c
+static uint16_t ProcessAudioSample(uint16_t sample)
+{
+    sample &= AUDIO_SAMPLE_MASK;
+
+    if (sample_count == 0U)
+    {
+        for (uint8_t i = 0; i < MOVING_AVERAGE_WINDOW; i++)
+        {
+            sample_history[i] = sample;
+        }
+        last_valid_sample = sample;
+        sample_count = 1U;
+        return sample;
+    }
+```
+
+The first line masks the sample to 12 bits. The first-sample branch initializes the history window so the first few outputs do not average against zeros.
+
+After the history has enough samples, the function calculates the local mean and rejects abnormal spikes:
+
+```c
+uint16_t mean = last_valid_sample;
+
+if (sample_count >= MOVING_AVERAGE_WINDOW)
+{
+    uint32_t sum = 0U;
+    for (uint8_t i = 0; i < MOVING_AVERAGE_WINDOW; i++)
+    {
+        sum += sample_history[i];
+    }
+    mean = (uint16_t)(sum / MOVING_AVERAGE_WINDOW);
+    int diff = (int)sample - (int)mean;
+    if (abs(diff) > OUTLIER_THRESHOLD_12B)
+    {
+        accepted = mean;
+    }
+}
+```
+
+Then it writes the accepted value into the circular history and returns the filtered average:
+
+```c
+sample_history[buffer_index] = accepted;
+buffer_index++;
+if (buffer_index >= MOVING_AVERAGE_WINDOW)
+{
+    buffer_index = 0U;
+}
+
+uint32_t filtered_sum = 0U;
+for (uint8_t i = 0; i < MOVING_AVERAGE_WINDOW; i++)
+{
+    filtered_sum += sample_history[i];
+}
+last_valid_sample = (uint16_t)(filtered_sum / MOVING_AVERAGE_WINDOW) & AUDIO_SAMPLE_MASK;
+return last_valid_sample;
+```
+
+Why this structure is useful for learning:
+
+- Masking happens first because every later stage assumes a valid 12-bit sample.
+- Outlier rejection happens before the moving average so spikes do not pollute the history.
+- The moving average is integer-only, which is suitable for realtime embedded code.
+- `last_valid_sample` is used as a safe fallback if a spike is detected.
+
+### 4. Follow SPI receive callbacks into UART output
+
+The Processing STM32 receives the same 200-sample block size used by the Sampling STM32. Each callback processes half of the block:
+
+```c
+void HAL_SPI_RxHalfCpltCallback(SPI_HandleTypeDef *hspi)
+{
+    if(hspi->Instance == SPI1)
+    {
+        if (tx_queue_full()) {
+            return;
+        }
+        uint8_t *buf = tx_pool[tx_wr];
+        for(int i = 0; i < 100; i++)
+        {
+            uint16_t avg = ProcessAudioSample(spi_rx_buffer[i]);
+            buf[i * 2]     = (uint8_t)(avg & 0xFF);
+            buf[i * 2 + 1] = (uint8_t)((avg >> 8) & 0x0F);
+        }
+        tx_enqueue();
+    }
+}
+```
+
+The full-complete callback does the same for the second half:
+
+```c
+uint16_t avg = ProcessAudioSample(spi_rx_buffer[i + 100]);
+buf[i * 2]     = (uint8_t)(avg & 0xFF);
+buf[i * 2 + 1] = (uint8_t)((avg >> 8) & 0x0F);
+```
+
+This shows the final output format clearly:
+
+- Each filtered sample becomes two UART bytes.
+- The first byte stores bits `0..7`.
+- The second byte stores bits `8..11`.
+- The upper 4 bits of the second byte are kept clear.
+
+### 5. Understand the UART DMA queue
+
+UART at 921600 bit/s is close to the required throughput, so the code avoids blocking transmit calls. A 4-slot pool buffers outgoing UART blocks:
+
+```c
+static void tx_enqueue(void)
+{
+    uint8_t next_wr = (tx_wr + 1U) % TX_BUF_COUNT;
+    if (tx_queue_full()) {
+        return;
+    }
+
+    tx_wr = next_wr;
+    tx_cnt++;
+
+    if (!tx_busy) {
+        tx_busy = 1U;
+        HAL_UART_Transmit_DMA(&huart2, tx_pool[tx_rd], TX_BUF_SIZE);
+        tx_rd = (tx_rd + 1U) % TX_BUF_COUNT;
+        tx_cnt--;
+    }
+}
+```
+
+When a DMA transmit finishes, the completion callback starts the next queued block:
+
+```c
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART2) {
+        if (tx_cnt > 0U) {
+            HAL_UART_Transmit_DMA(&huart2, tx_pool[tx_rd], TX_BUF_SIZE);
+            tx_rd = (tx_rd + 1U) % TX_BUF_COUNT;
+            tx_cnt--;
+        } else {
+            tx_busy = 0U;
+        }
+    }
+}
+```
+
+This is the main reason SPI callbacks can finish quickly. They fill a buffer and enqueue it, while DMA handles the slower UART transfer in the background.
+
+### 6. Read the PC command parser
+
+The PC talks to the Processing STM32 over `USART2`. The command parser handles three kinds of commands:
+
+```c
+if (expecting_distance_threshold != 0U)
+{
+    /* next byte is the new distance threshold */
+}
+else if(pc_rx_byte == 'M' || pc_rx_byte == 'S')
+{
+    system_state = pc_rx_byte;
+    ForwardSamplingCommand(pc_rx_byte);
+}
+else if (pc_rx_byte == 'D')
+{
+    system_state = 'D';
+    SendPcStatus("ACK:D\n");
+}
+else if (pc_rx_byte == 'R')
+{
+    expecting_distance_threshold = 1U;
+}
+```
+
+How to study this:
+
+- `M` and `S` are forwarded to the Sampling STM32 immediately.
+- `D` changes the Processing STM32 into sensor-controlled mode.
+- `R` does not contain the threshold by itself. It means the next received byte is the threshold.
+
+The threshold byte is clamped before it is accepted:
+
+```c
+if (pc_rx_byte < HCSR04_MIN_TRIGGER_CM)
+{
+    hcsr04_trigger_cm = HCSR04_MIN_TRIGGER_CM;
+}
+else if (pc_rx_byte > HCSR04_MAX_TRIGGER_CM)
+{
+    hcsr04_trigger_cm = HCSR04_MAX_TRIGGER_CM;
+}
+else
+{
+    hcsr04_trigger_cm = pc_rx_byte;
+}
+
+snprintf(status_msg, sizeof(status_msg), "ACK:R:%u\n", hcsr04_trigger_cm);
+SendPcStatus(status_msg);
+```
+
+This is why the Python CLI can confirm the exact threshold that the STM32 accepted.
+
+### 7. Study the distance-trigger state machine
+
+The distance logic converts measured distance into start/stop commands:
+
+```c
+static void UpdateDistanceTrigger(float distance_cm)
+{
+    if (distance_cm > 0.0f && distance_cm <= (float)hcsr04_trigger_cm)
+    {
+        trigger_count++;
+        release_count = 0;
+        if ((trigger_count >= HCSR04_DEBOUNCE_COUNT) && (distance_recording_active == 0U))
+        {
+            uint8_t cmd = 'M';
+            distance_recording_active = 1U;
+            ForwardSamplingCommand(cmd);
+        }
+    }
+    else if (distance_cm > (float)hcsr04_trigger_cm)
+    {
+        release_count++;
+        trigger_count = 0;
+        if ((release_count >= HCSR04_DEBOUNCE_COUNT) && (distance_recording_active != 0U))
+        {
+            uint8_t cmd = 'S';
+            distance_recording_active = 0U;
+            ForwardSamplingCommand(cmd);
+        }
+    }
+}
+```
+
+The two counters are the debounce mechanism:
+
+- `trigger_count` must reach 3 before recording starts.
+- `release_count` must reach 3 before recording stops.
+- This prevents one unstable HC-SR04 reading from toggling recording state.
+
+### 8. Connect the HC-SR04 reading to the state machine
+
+`HCSR04_Read()` sends a 10 microsecond trigger pulse:
+
+```c
+void HCSR04_Read(void)
+{
+    Is_First_Captured = 0;
+    __HAL_TIM_SET_CAPTUREPOLARITY(&htim2, TIM_CHANNEL_1, TIM_INPUTCHANNELPOLARITY_RISING);
+    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
+    delay_uS(10);
+    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
+    __HAL_TIM_ENABLE_IT(&htim2, TIM_IT_CC1);
+}
+```
+
+The timer input-capture callback measures the echo pulse width. When a valid distance is computed, Distance Trigger Mode calls `UpdateDistanceTrigger(distance)`.
+
+### 9. What to change when studying the code
+
+| Goal | Change here | What to watch |
+|---|---|---|
+| Make outlier rejection stricter or looser | `OUTLIER_THRESHOLD_12B` | Too low can flatten real transients; too high may let spikes pass. |
+| Change moving average strength | `MOVING_AVERAGE_WINDOW` and `sample_history[]` logic | Larger windows add latency and can blur audio. |
+| Change trigger range limits | `HCSR04_MIN_TRIGGER_CM` and `HCSR04_MAX_TRIGGER_CM` | Python validation should match firmware limits. |
+| Change trigger stability | `HCSR04_DEBOUNCE_COUNT` | Higher values reduce false triggers but react more slowly. |
+| Change PC baud rate | `huart2.Init.BaudRate` and Python `BAUD` | 44.1 ksps x 2 bytes/sample needs about 882000 serial bits/s with 8-N-1 framing. |
+| Change output sample format | UART packing in SPI callbacks and Python `decode_samples()` | Both sides must agree on byte order and bit depth. |
+
 ## Requirement-by-requirement Justification
 
 | Project specification requirement | Why this design satisfies it | Code-level implementation |

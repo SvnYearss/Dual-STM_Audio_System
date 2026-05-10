@@ -201,23 +201,41 @@ T12_44100Hz_12bit_Manual_Mode.wav
 T12_44100Hz_12bit_Distance_Trigger_1.csv
 ```
 
-### PC-side audio cleanup
+### PC-side audio clarification and cleanup
 
-Why these filters are used:
+Why this improves the clarity of the audio:
 
-- The embedded system already performs real-time filtering, but PC-side processing can improve final output quality without risking STM timing.
-- These filters are not used to replace the embedded requirements; they improve the final saved files.
+- The STM32 firmware must prioritise deterministic realtime behaviour. Heavy noise reduction is therefore kept on the PC, where Python and `numpy` can process a complete captured buffer without disturbing ADC timing, SPI transfer, or UART streaming.
+- The embedded Processing STM32 already satisfies the realtime filtering requirement with outlier rejection and a 3-sample moving average. The Python stage is an additional post-processing stage that improves the final saved files by reducing common capture artifacts.
+- Audio is decoded as 12-bit data before cleanup, so the filters operate on the full available sample resolution instead of an already-compressed 8-bit signal.
+- The cleanup pipeline targets different audible problems separately: impulse clicks, DC offset, low-frequency rumble, broadband background hiss, quiet-section noise, muddy low-mid buildup, excessive high-frequency noise, and start/end clicks.
+- The filtered samples are used for TXT, WAV, CSV, and PNG output, so the exported evidence and playback file all represent the clarified final signal.
 
-How it is implemented:
+How the clarity pipeline is implemented:
 
-- `deglitch_samples()` removes large sample spikes.
-- `_one_pole_highpass()` reduces DC and low-frequency rumble.
-- `_zero_phase_lowpass()` limits high-frequency noise.
-- `_spectral_denoise()` estimates a noise profile from quiet frames.
-- `_soft_noise_gate()` lowers quiet-section noise.
-- `_speech_clarity_eq()` adjusts speech clarity bands.
-- `_apply_edge_fade()` reduces start/end clicks.
-- `filter_background_noise()` combines the enabled filters.
+1. `process_outputs()` decodes the raw UART byte stream with `decode_samples()`.
+2. `deglitch_samples()` removes spike samples before any frequency-domain processing.
+3. `filter_background_noise()` converts the signal to a centred floating-point waveform.
+4. `_one_pole_highpass()` removes DC offset and very low-frequency rumble below `HIGHPASS_CUTOFF_HZ`.
+5. `_spectral_denoise()` estimates the noise profile from the quietest frames and attenuates frequency bins that look like steady background noise.
+6. `_soft_noise_gate()` reduces the gain of low-energy frames so pauses and quiet regions contain less hiss.
+7. `_speech_clarity_eq()` cuts the muddy low-mid band and slightly boosts the presence band to make speech and tone changes easier to hear.
+8. `_zero_phase_lowpass()` limits high-frequency noise above `LOWPASS_CUTOFF_HZ` while reducing phase shift by filtering forward and backward.
+9. `_apply_edge_fade()` applies a short fade at the start and end to reduce clicks caused by abrupt capture boundaries.
+10. The result is clipped back into the valid 12-bit range `0..4095` and written to the selected output formats.
+
+| Audio clarity problem | Technique used | Why this technique was chosen | Code-level implementation |
+|---|---|---|---|
+| Single-sample spikes or serial/ADC glitches | Deglitching with local history | A sudden isolated sample jump is usually not meaningful audio. Replacing it before filtering prevents clicks from spreading into the processed output. | `deglitch_samples()` compares each sample with a 3-sample local mean and replaces large deviations above `OUTLIER_THRESHOLD`. |
+| DC offset and handling noise | High-pass filter | Removing very low-frequency content recentres the waveform and prevents speaker movement or rumble from masking the useful audio. | `_one_pole_highpass(signal, sample_rate, HIGHPASS_CUTOFF_HZ)`, with `HIGHPASS_CUTOFF_HZ = 70.0`. |
+| Constant background hiss | Spectral denoise | The quietest frames are used as an estimated noise profile, allowing steady noise to be reduced without simply lowering the whole recording volume. | `_spectral_denoise()` uses STFT frames, median quiet-frame magnitudes, and a bounded gain floor. |
+| Noise during pauses | Soft noise gate | A hard gate can sound unnatural. A soft gate lowers quiet regions while preserving some ambience, making the result cleaner without abrupt silence. | `_soft_noise_gate()` estimates frame RMS, derives a threshold from the lower-energy frames, smooths the gain curve, and applies it to the signal. |
+| Muddy low-mid sound | Low-mid reduction | The `180 Hz` to `500 Hz` range can make captured audio sound muffled, especially with small microphones or imperfect analog front ends. | `_speech_clarity_eq()` subtracts `MUD_CUT * mud`, where the mud band is produced by `_bandpass()`. |
+| Weak speech or tone definition | Presence-band boost | A small boost in the `1.8 kHz` to `6.5 kHz` range improves intelligibility and makes waveform changes easier to hear. | `_speech_clarity_eq()` adds `PRESENCE_BOOST * presence`. |
+| High-frequency hash | Low-pass filter | Frequencies above the useful content can make playback sound noisy and can distract from the captured signal. | `_zero_phase_lowpass(signal, sample_rate, LOWPASS_CUTOFF_HZ)`, with `LOWPASS_CUTOFF_HZ = 12000.0`. |
+| Start and stop clicks | Edge fade | Manual and distance-triggered recording can begin or end at a non-zero waveform value. A short fade avoids abrupt discontinuities. | `_apply_edge_fade()` applies a `20 ms` ramp at both edges. |
+
+The important design choice is that the PC cleanup improves the **clarity of the final audio output** without changing the embedded-system evidence: the STM32 side still performs the required realtime acquisition, inter-board transfer, outlier rejection, and moving average filtering, while Python performs optional final polishing before files are generated.
 
 ## Rich UI
 
@@ -241,7 +259,7 @@ How it is implemented:
 | Task 1: Python saves received audio samples to file | Raw and text outputs preserve the captured data for later inspection. | `record_for_duration()` writes `recording_raw.bin`; `generate_txt()` writes a readable sample file. |
 | Task 1: recording time is hardcoded | This was superseded by Task 2. The final version intentionally uses user-defined duration because the final specification requires Manual Mode control. | `manual_recording_mode()` asks for `duration`; the old hardcoded behavior is not retained. |
 | Task 1: Python compiles and runs a C program for WAV conversion | The final WAV path follows the required Python-plus-C workflow. | `compile_and_run_c_converter()` uses `subprocess.run()` for `gcc` and the converter executable. |
-| Task 1: output should be recognisably the input audio | The CLI saves the stream and invokes the WAV converter; PC-side filters can improve audibility. | `process_outputs()` decodes, filters, writes TXT, and optionally generates WAV. |
+| Task 1: output should be recognisably the input audio | The CLI preserves the 12-bit stream, then applies a targeted clarity pipeline before file generation so the final WAV is easier to hear and compare with the input. | `process_outputs()` calls `decode_samples()`, `deglitch_samples()`, `filter_background_noise()`, `generate_txt()`, and optionally the C WAV converter. |
 | Task 2: CLI has a clear menu structure | Users can choose Manual Mode, Distance Trigger Mode, or Quit. | `main()` prints choices `1`, `2`, and `q`. |
 | Task 2: Manual Mode allows user-specified recording time | The duration is entered at runtime, so no code change is needed to test different capture lengths. | `manual_recording_mode()` reads `duration = float(input(...))`. |
 | Task 2: Distance Trigger Mode is available | The CLI can switch the Processing STM32 into sensor-controlled recording. | `distance_trigger_mode()` sends `D` and waits for `ACK:D`. |
@@ -251,7 +269,7 @@ How it is implemented:
 | Task 2: PNG includes title and axis labels | The plot is ready to interpret without manually adding labels. | `generate_png()` sets title, x label, y label, grid, and layout. |
 | Task 2: CSV first row indicates sample rate | The sample rate is written into the file so the signal can be reconstructed. | `generate_csv()` writes `Sample Rate:,<rate>` as the first row. |
 | Task 2: filenames include team ID and sample rate | The naming convention makes outputs self-describing. | `output_filename()` includes `TEAM_ID` and `<sample_rate>Hz`. |
-| Task 3: audio quality is improved | PC-side filters supplement the Processing STM32 outlier rejection and moving average. | `deglitch_samples()` and `filter_background_noise()` are called before output generation. |
+| Task 3: audio quality is improved | PC-side processing supplements the STM32 moving average by removing spikes, rumble, hiss, quiet-section noise, muddy low-mid energy, high-frequency hash, and edge clicks. This improves clarity without adding realtime load to either STM32. | `deglitch_samples()`, `_one_pole_highpass()`, `_spectral_denoise()`, `_soft_noise_gate()`, `_speech_clarity_eq()`, `_zero_phase_lowpass()`, and `_apply_edge_fade()` are called through `filter_background_noise()`. |
 | Task 3: 22 ksps / 8-bit intermediate output | This final version supersedes the intermediate mode with Task 4 quality. It keeps 44.1 ksps / 12-bit output instead. | `OUTPUT_FS = 44100`; `BIT_DEPTH = 12`; samples are masked with `0x0FFF`. |
 | Task 4: final output file sample rate is 44 ksps or higher | The PC output uses 44100 Hz metadata and filenames. | `OUTPUT_FS = NOMINAL_FS`; `NOMINAL_FS = 44100`. |
 | Task 4: final output file bit depth is 12-bit | Python decodes and labels the data as 12-bit, and the C converter writes 12 valid bits. | `BIT_DEPTH = 12`; `decode_samples()` masks with `0x0FFF`; WAV converter uses 12 valid bits. |

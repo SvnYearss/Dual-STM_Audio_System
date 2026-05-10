@@ -131,6 +131,177 @@ How it is implemented:
 - `Audio_Start()` starts ADC DMA and `TIM6`.
 - `Audio_Stop()` stops `TIM6` and ADC DMA.
 
+## Code Reading Guide
+
+This section is written as a guide for students who want to study or modify the Sampling STM32 code. Read the firmware in this order: global state, start/stop control, peripheral configuration, then DMA callbacks.
+
+### 1. Start with the acquisition state
+
+The key variables are near the user private variable section of `Core/Src/main.c`:
+
+```c
+uint8_t cmd_rx = 0;
+volatile uint8_t audio_streaming = 0;
+uint16_t adc_buffer[200];
+```
+
+How to understand this:
+
+- `cmd_rx` stores one command byte received from the Processing STM32.
+- `audio_streaming` prevents repeated `M` commands from starting ADC DMA multiple times.
+- `adc_buffer[200]` is the DMA audio buffer. At 12-bit ADC resolution, each sample fits in one `uint16_t`.
+- The buffer is intentionally split into two halves of 100 samples. One half can be transmitted while the ADC/DMA continues filling the other half.
+
+### 2. Follow the command receiver
+
+The Sampling STM32 does not decide recording mode itself. It only reacts to `M` and `S` commands forwarded by the Processing STM32:
+
+```c
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART1)
+    {
+        if(cmd_rx == 'M')
+        {
+            Audio_Start();
+        }
+        else if (cmd_rx == 'S')
+        {
+            Audio_Stop();
+        }
+        HAL_UART_Receive_IT(&huart1, &cmd_rx, 1);
+    }
+}
+```
+
+What this teaches:
+
+- `USART1` is the command link from Processing STM32 to Sampling STM32.
+- The callback is interrupt-driven, so the main loop does not need to poll commands.
+- The final line arms the next one-byte receive interrupt. Without it, only the first command would be received.
+
+### 3. Read the start/stop functions
+
+`Audio_Start()` is the point where acquisition actually begins:
+
+```c
+static void Audio_Start(void)
+{
+    if (audio_streaming == 0U)
+    {
+        __HAL_TIM_SET_COUNTER(&htim6, 0);
+        if (HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, 200) == HAL_OK)
+        {
+            HAL_TIM_Base_Start(&htim6);
+            audio_streaming = 1U;
+        }
+    }
+}
+```
+
+The important detail is the order:
+
+1. Reset the timer counter.
+2. Start ADC DMA into `adc_buffer`.
+3. Start `TIM6`.
+
+This order matters because the ADC is externally triggered by `TIM6`. Starting DMA before the timer ensures the ADC already has a valid destination buffer when the first timer trigger arrives.
+
+`Audio_Stop()` reverses the active data path:
+
+```c
+static void Audio_Stop(void)
+{
+    if (audio_streaming != 0U)
+    {
+        HAL_TIM_Base_Stop(&htim6);
+        HAL_ADC_Stop_DMA(&hadc1);
+        audio_streaming = 0U;
+    }
+}
+```
+
+Stopping the timer first prevents new ADC triggers while DMA is being stopped.
+
+### 4. Connect `TIM6` to the ADC
+
+The sample rate is controlled by `TIM6`, not by a software loop:
+
+```c
+htim6.Instance = TIM6;
+htim6.Init.Prescaler = 5;
+htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
+htim6.Init.Period = 120;
+sMasterConfig.MasterOutputTrigger = TIM_TRGO_UPDATE;
+```
+
+The ADC is configured to convert on the rising edge of that timer trigger:
+
+```c
+hadc1.Init.Resolution = ADC_RESOLUTION_12B;
+hadc1.Init.ExternalTrigConv = ADC_EXTERNALTRIG_T6_TRGO;
+hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_RISING;
+hadc1.Init.DMAContinuousRequests = ENABLE;
+```
+
+This is the core of the 44.1 ksps design. `TIM6` defines the cadence, `ADC1` performs one conversion per cadence tick, and DMA stores the result without CPU involvement.
+
+### 5. Understand the half-buffer transmit pattern
+
+The ADC DMA callbacks are where samples leave the Sampling STM32:
+
+```c
+void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef* hadc)
+{
+    if(hadc->Instance == ADC1)
+    {
+        HAL_SPI_Transmit_DMA(&hspi1, (uint8_t*)&adc_buffer[0], 100);
+    }
+}
+
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
+{
+    if(hadc->Instance == ADC1)
+    {
+        HAL_SPI_Transmit_DMA(&hspi1, (uint8_t*)&adc_buffer[100], 100);
+    }
+}
+```
+
+How to read this:
+
+- Half-complete means `adc_buffer[0]` to `adc_buffer[99]` are ready.
+- Complete means `adc_buffer[100]` to `adc_buffer[199]` are ready.
+- Each half-buffer is sent immediately through SPI DMA.
+- This is a ping-pong pattern: the ADC DMA fills one half while SPI DMA transmits the other half.
+
+### 6. Understand the SPI format
+
+SPI is configured as a master transmitter:
+
+```c
+hspi1.Instance = SPI1;
+hspi1.Init.Mode = SPI_MODE_MASTER;
+hspi1.Init.DataSize = SPI_DATASIZE_16BIT;
+hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
+```
+
+The ADC only produces 12 valid bits, but using a 16-bit SPI frame keeps each sample aligned as one word. The Processing STM32 later masks the lower 12 bits with `0x0FFF`.
+
+### 7. What to change when studying the code
+
+Use these entry points when experimenting:
+
+| Goal | Change here | What to watch |
+|---|---|---|
+| Change sample rate | `htim6.Init.Prescaler` and `htim6.Init.Period` | Update Python/C metadata if the final output rate changes. |
+| Change ADC resolution | `hadc1.Init.Resolution` | The Processing STM32 mask and PC decoder must match. |
+| Change buffer size | `adc_buffer[200]` and DMA callback sizes | Both halves must stay equal, and Processing STM32 receive size should match. |
+| Change inter-board speed | `hspi1.Init.BaudRatePrescaler` | SPI must remain fast enough for 44.1 ksps x 16-bit samples. |
+| Add debug output | Use a separate UART or GPIO toggle | Avoid blocking inside ADC callbacks. |
+
+For this project, the current values are the final version because they support the Task 4 requirement: 44.1 ksps, 12-bit samples, SPI transfer, and DMA-based continuous acquisition.
+
 ## Requirement-by-requirement Justification
 
 | Project specification requirement | Why this design satisfies it | Code-level implementation |
